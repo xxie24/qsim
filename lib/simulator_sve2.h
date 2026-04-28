@@ -179,21 +179,28 @@ class SimulatorSVE2 final : public SimulatorBase {
         svst1_f32(pg, tmp_is + k * vl, svld1_f32(pg, p0 + xss[k] + vl));
       }
 
-      for (unsigned k = 0; k < hsize; ++k) {
-        svfloat32_t rn = svdup_n_f32(0);
-        svfloat32_t in = svdup_n_f32(0);
+      uint64_t j = 0;
 
-        for (unsigned l = 0; l < hsize; ++l) {
+      for (unsigned k = 0; k < hsize; ++k) {
+        svfloat32_t ru = svdup_n_f32(v[j]);
+        svfloat32_t iu = svdup_n_f32(v[j + 1]);
+        svfloat32_t rn = svmul_f32_x(pg, svld1_f32(pg, tmp_rs + 0 * vl), ru);
+        svfloat32_t in = svmul_f32_x(pg, svld1_f32(pg, tmp_rs + 0 * vl), iu);
+        rn = svmls_f32_x(pg, rn, svld1_f32(pg, tmp_is + 0 * vl), iu);
+        in = svmla_f32_x(pg, in, svld1_f32(pg, tmp_is + 0 * vl), ru);
+        j += 2;
+
+        for (unsigned l = 1; l < hsize; ++l) {
+          ru = svdup_n_f32(v[j]);
+          iu = svdup_n_f32(v[j + 1]);
           svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
           svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
-
-          svfloat32_t ru = svdup_n_f32(v[2 * (k * hsize + l)]);
-          svfloat32_t iu = svdup_n_f32(v[2 * (k * hsize + l) + 1]);
 
           rn = svmla_f32_x(pg, rn, rl, ru);
           rn = svmls_f32_x(pg, rn, il, iu);
           in = svmla_f32_x(pg, in, rl, iu);
           in = svmla_f32_x(pg, in, il, ru);
+          j += 2;
         }
 
         svst1_f32(pg, p0 + xss[k], rn);
@@ -286,25 +293,81 @@ class SimulatorSVE2 final : public SimulatorBase {
         }
       }
 
-      for (unsigned k = 0; k < hsize; ++k) {
-        svfloat32_t rn = svdup_n_f32(0);
-        svfloat32_t in = svdup_n_f32(0);
+      for (unsigned k = 0; k < hsize; ) {
+        if (hsize - k >= 4) {
+          svfloat32_t rn0 = svdup_n_f32(0), in0 = svdup_n_f32(0);
+          svfloat32_t rn1 = svdup_n_f32(0), in1 = svdup_n_f32(0);
+          svfloat32_t rn2 = svdup_n_f32(0), in2 = svdup_n_f32(0);
+          svfloat32_t rn3 = svdup_n_f32(0), in3 = svdup_n_f32(0);
 
-        for (unsigned l = 0; l < gsize; ++l) {
-          svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
-          svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
+          for (unsigned l = 0; l < gsize; ++l) {
+            svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
+            svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
 
-          svfloat32_t wre = svld1_f32(pg, wre_ptr + (k * gsize + l) * vl);
-          svfloat32_t wim = svld1_f32(pg, wim_ptr + (k * gsize + l) * vl);
+            svfloat32_t wre0 = svld1_f32(pg, wre_ptr + ((k+0) * gsize + l) * vl);
+            svfloat32_t wim0 = svld1_f32(pg, wim_ptr + ((k+0) * gsize + l) * vl);
+            rn0 = svmla_f32_x(pg, rn0, rl, wre0); rn0 = svmls_f32_x(pg, rn0, il, wim0);
+            in0 = svmla_f32_x(pg, in0, rl, wim0); in0 = svmla_f32_x(pg, in0, il, wre0);
 
-          rn = svmla_f32_x(pg, rn, rl, wre);
-          rn = svmls_f32_x(pg, rn, il, wim);
-          in = svmla_f32_x(pg, in, rl, wim);
-          in = svmla_f32_x(pg, in, il, wre);
+            svfloat32_t wre1 = svld1_f32(pg, wre_ptr + ((k+1) * gsize + l) * vl);
+            svfloat32_t wim1 = svld1_f32(pg, wim_ptr + ((k+1) * gsize + l) * vl);
+            rn1 = svmla_f32_x(pg, rn1, rl, wre1); rn1 = svmls_f32_x(pg, rn1, il, wim1);
+            in1 = svmla_f32_x(pg, in1, rl, wim1); in1 = svmla_f32_x(pg, in1, il, wre1);
+
+            svfloat32_t wre2 = svld1_f32(pg, wre_ptr + ((k+2) * gsize + l) * vl);
+            svfloat32_t wim2 = svld1_f32(pg, wim_ptr + ((k+2) * gsize + l) * vl);
+            rn2 = svmla_f32_x(pg, rn2, rl, wre2); rn2 = svmls_f32_x(pg, rn2, il, wim2);
+            in2 = svmla_f32_x(pg, in2, rl, wim2); in2 = svmla_f32_x(pg, in2, il, wre2);
+
+            svfloat32_t wre3 = svld1_f32(pg, wre_ptr + ((k+3) * gsize + l) * vl);
+            svfloat32_t wim3 = svld1_f32(pg, wim_ptr + ((k+3) * gsize + l) * vl);
+            rn3 = svmla_f32_x(pg, rn3, rl, wre3); rn3 = svmls_f32_x(pg, rn3, il, wim3);
+            in3 = svmla_f32_x(pg, in3, rl, wim3); in3 = svmla_f32_x(pg, in3, il, wre3);
+          }
+
+          svst1_f32(pg, p0 + xss[k+0], rn0); svst1_f32(pg, p0 + xss[k+0] + vl, in0);
+          svst1_f32(pg, p0 + xss[k+1], rn1); svst1_f32(pg, p0 + xss[k+1] + vl, in1);
+          svst1_f32(pg, p0 + xss[k+2], rn2); svst1_f32(pg, p0 + xss[k+2] + vl, in2);
+          svst1_f32(pg, p0 + xss[k+3], rn3); svst1_f32(pg, p0 + xss[k+3] + vl, in3);
+          k += 4;
+        } else if (hsize - k >= 2) {
+          svfloat32_t rn0 = svdup_n_f32(0), in0 = svdup_n_f32(0);
+          svfloat32_t rn1 = svdup_n_f32(0), in1 = svdup_n_f32(0);
+
+          for (unsigned l = 0; l < gsize; ++l) {
+            svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
+            svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
+
+            svfloat32_t wre0 = svld1_f32(pg, wre_ptr + ((k+0) * gsize + l) * vl);
+            svfloat32_t wim0 = svld1_f32(pg, wim_ptr + ((k+0) * gsize + l) * vl);
+            rn0 = svmla_f32_x(pg, rn0, rl, wre0); rn0 = svmls_f32_x(pg, rn0, il, wim0);
+            in0 = svmla_f32_x(pg, in0, rl, wim0); in0 = svmla_f32_x(pg, in0, il, wre0);
+
+            svfloat32_t wre1 = svld1_f32(pg, wre_ptr + ((k+1) * gsize + l) * vl);
+            svfloat32_t wim1 = svld1_f32(pg, wim_ptr + ((k+1) * gsize + l) * vl);
+            rn1 = svmla_f32_x(pg, rn1, rl, wre1); rn1 = svmls_f32_x(pg, rn1, il, wim1);
+            in1 = svmla_f32_x(pg, in1, rl, wim1); in1 = svmla_f32_x(pg, in1, il, wre1);
+          }
+
+          svst1_f32(pg, p0 + xss[k+0], rn0); svst1_f32(pg, p0 + xss[k+0] + vl, in0);
+          svst1_f32(pg, p0 + xss[k+1], rn1); svst1_f32(pg, p0 + xss[k+1] + vl, in1);
+          k += 2;
+        } else {
+          svfloat32_t rn0 = svdup_n_f32(0), in0 = svdup_n_f32(0);
+
+          for (unsigned l = 0; l < gsize; ++l) {
+            svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
+            svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
+
+            svfloat32_t wre0 = svld1_f32(pg, wre_ptr + ((k+0) * gsize + l) * vl);
+            svfloat32_t wim0 = svld1_f32(pg, wim_ptr + ((k+0) * gsize + l) * vl);
+            rn0 = svmla_f32_x(pg, rn0, rl, wre0); rn0 = svmls_f32_x(pg, rn0, il, wim0);
+            in0 = svmla_f32_x(pg, in0, rl, wim0); in0 = svmla_f32_x(pg, in0, il, wre0);
+          }
+
+          svst1_f32(pg, p0 + xss[k+0], rn0); svst1_f32(pg, p0 + xss[k+0] + vl, in0);
+          k += 1;
         }
-
-        svst1_f32(pg, p0 + xss[k], rn);
-        svst1_f32(pg, p0 + xss[k] + vl, in);
       }
     };
 
@@ -349,21 +412,28 @@ class SimulatorSVE2 final : public SimulatorBase {
         svst1_f32(pg, tmp_is + k * vl, svld1_f32(pg, p0 + xss[k] + vl));
       }
 
-      for (unsigned k = 0; k < hsize; ++k) {
-        svfloat32_t rn = svdup_n_f32(0);
-        svfloat32_t in = svdup_n_f32(0);
+      uint64_t j = 0;
 
-        for (unsigned l = 0; l < hsize; ++l) {
+      for (unsigned k = 0; k < hsize; ++k) {
+        svfloat32_t ru = svdup_n_f32(v[j]);
+        svfloat32_t iu = svdup_n_f32(v[j + 1]);
+        svfloat32_t rn = svmul_f32_x(pg, svld1_f32(pg, tmp_rs + 0 * vl), ru);
+        svfloat32_t in = svmul_f32_x(pg, svld1_f32(pg, tmp_rs + 0 * vl), iu);
+        rn = svmls_f32_x(pg, rn, svld1_f32(pg, tmp_is + 0 * vl), iu);
+        in = svmla_f32_x(pg, in, svld1_f32(pg, tmp_is + 0 * vl), ru);
+        j += 2;
+
+        for (unsigned l = 1; l < hsize; ++l) {
+          ru = svdup_n_f32(v[j]);
+          iu = svdup_n_f32(v[j + 1]);
           svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
           svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
-
-          svfloat32_t ru = svdup_n_f32(v[2 * (k * hsize + l)]);
-          svfloat32_t iu = svdup_n_f32(v[2 * (k * hsize + l) + 1]);
 
           rn = svmla_f32_x(pg, rn, rl, ru);
           rn = svmls_f32_x(pg, rn, il, iu);
           in = svmla_f32_x(pg, in, rl, iu);
           in = svmla_f32_x(pg, in, il, ru);
+          j += 2;
         }
 
         svst1_f32(pg, p0 + xss[k], rn);
@@ -428,31 +498,69 @@ class SimulatorSVE2 final : public SimulatorBase {
       }
       svbool_t c_match = svcmpeq_u32(pg, svand_u32_z(pg, idx, svdup_n_u32(cmaskl)), expanded);
 
-      for (unsigned k = 0; k < hsize; ++k) {
-        svfloat32_t rn = svld1_f32(pg, tmp_rs + k * vl);
-        svfloat32_t in = svld1_f32(pg, tmp_is + k * vl);
+      for (unsigned k = 0; k < hsize; ) {
+        if (hsize - k >= 2) {
+          svfloat32_t rn0 = svld1_f32(pg, tmp_rs + (k+0) * vl);
+          svfloat32_t in0 = svld1_f32(pg, tmp_is + (k+0) * vl);
+          svfloat32_t rn1 = svld1_f32(pg, tmp_rs + (k+1) * vl);
+          svfloat32_t in1 = svld1_f32(pg, tmp_is + (k+1) * vl);
 
-        svfloat32_t rn_new = svdup_n_f32(0);
-        svfloat32_t in_new = svdup_n_f32(0);
+          svfloat32_t rn_new0 = svdup_n_f32(0), in_new0 = svdup_n_f32(0);
+          svfloat32_t rn_new1 = svdup_n_f32(0), in_new1 = svdup_n_f32(0);
+          uint64_t j0 = 2 * ((k+0) * hsize);
+          uint64_t j1 = 2 * ((k+1) * hsize);
 
-        for (unsigned l = 0; l < hsize; ++l) {
-          svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
-          svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
+          for (unsigned l = 0; l < hsize; ++l) {
+            svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
+            svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
 
-          svfloat32_t ru = svdup_n_f32(v[2 * (k * hsize + l)]);
-          svfloat32_t iu = svdup_n_f32(v[2 * (k * hsize + l) + 1]);
+            svfloat32_t ru0 = svdup_n_f32(v[j0]);
+            svfloat32_t iu0 = svdup_n_f32(v[j0 + 1]);
+            rn_new0 = svmla_f32_x(pg, rn_new0, rl, ru0); rn_new0 = svmls_f32_x(pg, rn_new0, il, iu0);
+            in_new0 = svmla_f32_x(pg, in_new0, rl, iu0); in_new0 = svmla_f32_x(pg, in_new0, il, ru0);
 
-          rn_new = svmla_f32_x(pg, rn_new, rl, ru);
-          rn_new = svmls_f32_x(pg, rn_new, il, iu);
-          in_new = svmla_f32_x(pg, in_new, rl, iu);
-          in_new = svmla_f32_x(pg, in_new, il, ru);
+            svfloat32_t ru1 = svdup_n_f32(v[j1]);
+            svfloat32_t iu1 = svdup_n_f32(v[j1 + 1]);
+            rn_new1 = svmla_f32_x(pg, rn_new1, rl, ru1); rn_new1 = svmls_f32_x(pg, rn_new1, il, iu1);
+            in_new1 = svmla_f32_x(pg, in_new1, rl, iu1); in_new1 = svmla_f32_x(pg, in_new1, il, ru1);
+            j0 += 2; j1 += 2;
+          }
+
+          rn0 = svsel_f32(c_match, rn_new0, rn0); in0 = svsel_f32(c_match, in_new0, in0);
+          rn1 = svsel_f32(c_match, rn_new1, rn1); in1 = svsel_f32(c_match, in_new1, in1);
+
+          svst1_f32(pg, p0 + xss[k+0], rn0); svst1_f32(pg, p0 + xss[k+0] + vl, in0);
+          svst1_f32(pg, p0 + xss[k+1], rn1); svst1_f32(pg, p0 + xss[k+1] + vl, in1);
+          k += 2;
+        } else {
+          svfloat32_t rn = svld1_f32(pg, tmp_rs + k * vl);
+          svfloat32_t in = svld1_f32(pg, tmp_is + k * vl);
+
+          svfloat32_t rn_new = svdup_n_f32(0);
+          svfloat32_t in_new = svdup_n_f32(0);
+          uint64_t j = 2 * (k * hsize);
+
+          for (unsigned l = 0; l < hsize; ++l) {
+            svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
+            svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
+
+            svfloat32_t ru = svdup_n_f32(v[j]);
+            svfloat32_t iu = svdup_n_f32(v[j + 1]);
+
+            rn_new = svmla_f32_x(pg, rn_new, rl, ru);
+            rn_new = svmls_f32_x(pg, rn_new, il, iu);
+            in_new = svmla_f32_x(pg, in_new, rl, iu);
+            in_new = svmla_f32_x(pg, in_new, il, ru);
+            j += 2;
+          }
+
+          rn = svsel_f32(c_match, rn_new, rn);
+          in = svsel_f32(c_match, in_new, in);
+
+          svst1_f32(pg, p0 + xss[k], rn);
+          svst1_f32(pg, p0 + xss[k] + vl, in);
+          k += 1;
         }
-
-        rn = svsel_f32(c_match, rn_new, rn);
-        in = svsel_f32(c_match, in_new, in);
-
-        svst1_f32(pg, p0 + xss[k], rn);
-        svst1_f32(pg, p0 + xss[k] + vl, in);
       }
     };
 
@@ -630,21 +738,28 @@ class SimulatorSVE2 final : public SimulatorBase {
       svfloat32_t acc_re = svdup_n_f32(0);
       svfloat32_t acc_im = svdup_n_f32(0);
 
-      for (unsigned k = 0; k < hsize; ++k) {
-        svfloat32_t rn = svdup_n_f32(0);
-        svfloat32_t in = svdup_n_f32(0);
+      uint64_t j = 0;
 
-        for (unsigned l = 0; l < hsize; ++l) {
+      for (unsigned k = 0; k < hsize; ++k) {
+        svfloat32_t ru = svdup_n_f32(v[j]);
+        svfloat32_t iu = svdup_n_f32(v[j + 1]);
+        svfloat32_t rn = svmul_f32_x(pg, svld1_f32(pg, tmp_rs + 0 * vl), ru);
+        svfloat32_t in = svmul_f32_x(pg, svld1_f32(pg, tmp_rs + 0 * vl), iu);
+        rn = svmls_f32_x(pg, rn, svld1_f32(pg, tmp_is + 0 * vl), iu);
+        in = svmla_f32_x(pg, in, svld1_f32(pg, tmp_is + 0 * vl), ru);
+        j += 2;
+
+        for (unsigned l = 1; l < hsize; ++l) {
+          ru = svdup_n_f32(v[j]);
+          iu = svdup_n_f32(v[j + 1]);
           svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
           svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
-
-          svfloat32_t ru = svdup_n_f32(v[2 * (k * hsize + l)]);
-          svfloat32_t iu = svdup_n_f32(v[2 * (k * hsize + l) + 1]);
 
           rn = svmla_f32_x(pg, rn, rl, ru);
           rn = svmls_f32_x(pg, rn, il, iu);
           in = svmla_f32_x(pg, in, rl, iu);
           in = svmla_f32_x(pg, in, il, ru);
+          j += 2;
         }
 
         svfloat32_t rk = svld1_f32(pg, tmp_rs + k * vl);
