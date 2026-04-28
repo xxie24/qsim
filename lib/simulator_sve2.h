@@ -17,6 +17,7 @@
 
 #include <complex>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <vector>
 
@@ -26,15 +27,33 @@
 #include <arm_sve.h>
 
 #include "simulator.h"
-#include "statespace_sve.h"
 #include "simulator_basic.h"
 #include "statespace_basic.h"
+#include "statespace_sve.h"
+
+// Macros to clean up SVE sizeless-type register unrolling
+#define QSIM_SVE_COMPUTE_STEP(I)                                       \
+  svfloat32_t m_kl##I = svreinterpret_f32_f64(svdup_n_f64(*p_v##I++)); \
+  rn##I = svcmla_f32_x(pg32, rn##I, sv_l, m_kl##I, 0);                 \
+  rn##I = svcmla_f32_x(pg32, rn##I, sv_l, m_kl##I, 90);
+
+#define QSIM_SVE_SCATTER_STEP(I)                        \
+  svst1_scatter_u64offset_f64(                          \
+      pg64, (double*)(p0 + xss[k + I]), v_lane_offsets, \
+      svreinterpret_f64_f32(rn##I));
+
+#define QSIM_SVE_CTRL_ORG_STEP(I)                                 \
+  svfloat32_t org##I;                                             \
+  if constexpr (N <= 2) {                                         \
+    org##I = svreinterpret_f32_f64(svld1_gather_u64offset_f64(    \
+        pg64, (const double*)(p0 + xss[k + I]), v_lane_offsets)); \
+  } else {                                                        \
+    org##I = svld1_f32(pg32, tmp + (k + I) * vl);                 \
+  }                                                               \
+  rn##I = svsel_f32(c_match, rn##I, org##I);
 
 namespace qsim {
 
-/**
- * Quantum circuit simulator with SVE2 vectorization.
- */
 template <typename For>
 class SimulatorSVE2 final : public SimulatorBase {
  public:
@@ -45,70 +64,114 @@ class SimulatorSVE2 final : public SimulatorBase {
   using BasicState = typename BasicStateSpace::State;
 
   template <typename... ForArgs>
-  explicit SimulatorSVE2(ForArgs&&... args) : for_(args...), basic_state_space_(args...), fallback_(args...) {}
+  explicit SimulatorSVE2(ForArgs&&... args)
+      : for_(args...), basic_state_space_(args...), fallback_(args...) {}
 
-  void ApplyGate(const std::vector<unsigned>& qs,
-                 const fp_type* matrix, State& state) const {
-    uint64_t vl = svcntw();
-    unsigned nlb = bits::Log2(vl);
+  void ApplyGate(
+      const std::vector<unsigned>& qs, const fp_type* matrix,
+      State& state) const {
+    uint64_t vl64 = svcntd();
+    unsigned k_param = bits::Log2(vl64) + qs.size();
+
+    if (state.num_qubits() < k_param) {
+      ApplyGateFallback(qs, matrix, state);
+      return;
+    }
 
     switch (qs.size()) {
       case 1:
-        if (qs[0] >= nlb) { ApplyGateH<1>(qs, matrix, state); }
-        else { ApplyGateL<0, 1>(qs, matrix, state); }
-        return;
+        ApplyGateCore<1>(qs, matrix, state);
+        break;
       case 2:
-        if (qs[0] >= nlb) { ApplyGateH<2>(qs, matrix, state); }
-        else if (qs[1] >= nlb) { ApplyGateL<1, 1>(qs, matrix, state); }
-        else { ApplyGateL<0, 2>(qs, matrix, state); }
-        return;
+        ApplyGateCore<2>(qs, matrix, state);
+        break;
       case 3:
-        if (qs[0] >= nlb) { ApplyGateH<3>(qs, matrix, state); }
-        else if (qs[1] >= nlb) { ApplyGateL<2, 1>(qs, matrix, state); }
-        else if (qs[2] >= nlb) { ApplyGateL<1, 2>(qs, matrix, state); }
-        else { ApplyGateL<0, 3>(qs, matrix, state); }
-        return;
+        ApplyGateCore<3>(qs, matrix, state);
+        break;
       case 4:
-        if (qs[0] >= nlb) { ApplyGateH<4>(qs, matrix, state); }
-        else if (qs[1] >= nlb) { ApplyGateL<3, 1>(qs, matrix, state); }
-        else if (qs[2] >= nlb) { ApplyGateL<2, 2>(qs, matrix, state); }
-        else if (qs[3] >= nlb) { ApplyGateL<1, 3>(qs, matrix, state); }
-        else { ApplyGateL<0, 4>(qs, matrix, state); }
-        return;
+        ApplyGateCore<4>(qs, matrix, state);
+        break;
       case 5:
-        if (qs[0] >= nlb) { ApplyGateH<5>(qs, matrix, state); }
-        else if (qs[1] >= nlb) { ApplyGateL<4, 1>(qs, matrix, state); }
-        else if (qs[2] >= nlb) { ApplyGateL<3, 2>(qs, matrix, state); }
-        else if (qs[3] >= nlb) { ApplyGateL<2, 3>(qs, matrix, state); }
-        else if (qs[4] >= nlb) { ApplyGateL<1, 4>(qs, matrix, state); }
-        else { ApplyGateL<0, 5>(qs, matrix, state); }
-        return;
+        ApplyGateCore<5>(qs, matrix, state);
+        break;
       case 6:
-        if (qs[0] >= nlb) { ApplyGateH<6>(qs, matrix, state); }
-        else if (qs[1] >= nlb) { ApplyGateL<5, 1>(qs, matrix, state); }
-        else if (qs[2] >= nlb) { ApplyGateL<4, 2>(qs, matrix, state); }
-        else if (qs[3] >= nlb) { ApplyGateL<3, 3>(qs, matrix, state); }
-        else if (qs[4] >= nlb) { ApplyGateL<2, 4>(qs, matrix, state); }
-        else if (qs[5] >= nlb) { ApplyGateL<1, 5>(qs, matrix, state); }
-        else { ApplyGateL<0, 6>(qs, matrix, state); }
-        return;
-      default: break;
+        ApplyGateCore<6>(qs, matrix, state);
+        break;
+      default:
+        ApplyGateFallback(qs, matrix, state);
+        break;
     }
   }
 
-  void ApplyControlledGate(const std::vector<unsigned>& qs,
-                           const std::vector<unsigned>& cqs, uint64_t cvals,
-                           const fp_type* matrix, State& state) const {
+  void ApplyControlledGate(
+      const std::vector<unsigned>& qs, const std::vector<unsigned>& cqs,
+      uint64_t cvals, const fp_type* matrix, State& state) const {
     if (cqs.empty()) {
       ApplyGate(qs, matrix, state);
       return;
     }
-    ApplyControlledGateFallback(qs, cqs, cvals, matrix, state);
+
+    uint64_t vl64 = svcntd();
+    unsigned k_param = bits::Log2(vl64) + qs.size() + cqs.size();
+
+    if (state.num_qubits() < k_param) {
+      ApplyControlledGateFallback(qs, cqs, cvals, matrix, state);
+      return;
+    }
+
+    switch (qs.size()) {
+      case 1:
+        ApplyControlledGateCore<1>(qs, cqs, cvals, matrix, state);
+        break;
+      case 2:
+        ApplyControlledGateCore<2>(qs, cqs, cvals, matrix, state);
+        break;
+      case 3:
+        ApplyControlledGateCore<3>(qs, cqs, cvals, matrix, state);
+        break;
+      case 4:
+        ApplyControlledGateCore<4>(qs, cqs, cvals, matrix, state);
+        break;
+      case 5:
+        ApplyControlledGateCore<5>(qs, cqs, cvals, matrix, state);
+        break;
+      case 6:
+        ApplyControlledGateCore<6>(qs, cqs, cvals, matrix, state);
+        break;
+      default:
+        ApplyControlledGateFallback(qs, cqs, cvals, matrix, state);
+        break;
+    }
   }
 
   std::complex<double> ExpectationValue(
       const std::vector<unsigned>& qs, const fp_type* matrix,
       const State& state) const {
+    uint64_t vl64 = svcntd();
+    unsigned k_param = bits::Log2(vl64) + qs.size();
+
+    if (state.num_qubits() < k_param) {
+      auto basic_state = CreateBasicState(state);
+      return fallback_.ExpectationValue(qs, matrix, basic_state);
+    }
+
+    switch (qs.size()) {
+      case 1:
+        return ExpectationValueCore<1>(qs, matrix, state);
+      case 2:
+        return ExpectationValueCore<2>(qs, matrix, state);
+      case 3:
+        return ExpectationValueCore<3>(qs, matrix, state);
+      case 4:
+        return ExpectationValueCore<4>(qs, matrix, state);
+      case 5:
+        return ExpectationValueCore<5>(qs, matrix, state);
+      case 6:
+        return ExpectationValueCore<6>(qs, matrix, state);
+      default:
+        break;
+    }
+
     auto basic_state = CreateBasicState(state);
     return fallback_.ExpectationValue(qs, matrix, basic_state);
   }
@@ -152,505 +215,229 @@ class SimulatorSVE2 final : public SimulatorBase {
   static unsigned SIMDRegisterSize() { return svcntw(); }
 
  private:
-
-  template <unsigned H>
-  void ApplyGateH(
+  template <unsigned N>
+  void ApplyGateCore(
       const std::vector<unsigned>& qs, const fp_type* matrix,
       State& state) const {
-    auto f = [](unsigned n, unsigned m, uint64_t i, const fp_type* v,
-                const uint64_t* ms, const uint64_t* xss, fp_type* rstate) {
-      constexpr unsigned hsize = 1 << H;
-      uint64_t vl = svcntw();
-      svbool_t pg = svptrue_b32();
+    constexpr unsigned gsize = 1 << N;
+    uint64_t vl64 = svcntd();
+    svbool_t pg64 = svptrue_b64();
 
-      i *= vl;
-      uint64_t ii = i & ms[0];
-      for (unsigned j = 1; j <= H; ++j) {
-        i *= 2; ii |= i & ms[j];
+    uint64_t ms[N + 1];
+    uint64_t xss[gsize];
+    FillIndices<N>(state.num_qubits(), qs, ms, xss);
+
+    uint64_t lane_offsets_buf[64];
+    for (uint64_t lane = 0; lane < vl64; ++lane) {
+      uint64_t shifted = lane;
+      uint64_t ii_lane = lane & ms[0];
+      for (unsigned j = 1; j <= N; ++j) {
+        shifted *= 2;
+        ii_lane |= shifted & ms[j];
       }
-      auto p0 = rstate + 2 * ii;
-      __builtin_prefetch(p0 + 64);
-
-      alignas(64) fp_type tmp_rs[4096];
-      alignas(64) fp_type tmp_is[4096];
-
-      for (unsigned k = 0; k < hsize; ++k) {
-        svst1_f32(pg, tmp_rs + k * vl, svld1_f32(pg, p0 + xss[k]));
-        svst1_f32(pg, tmp_is + k * vl, svld1_f32(pg, p0 + xss[k] + vl));
-      }
-
-      uint64_t j = 0;
-
-      for (unsigned k = 0; k < hsize; ++k) {
-        svfloat32_t ru = svdup_n_f32(v[j]);
-        svfloat32_t iu = svdup_n_f32(v[j + 1]);
-        svfloat32_t rn = svmul_f32_x(pg, svld1_f32(pg, tmp_rs + 0 * vl), ru);
-        svfloat32_t in = svmul_f32_x(pg, svld1_f32(pg, tmp_rs + 0 * vl), iu);
-        rn = svmls_f32_x(pg, rn, svld1_f32(pg, tmp_is + 0 * vl), iu);
-        in = svmla_f32_x(pg, in, svld1_f32(pg, tmp_is + 0 * vl), ru);
-        j += 2;
-
-        for (unsigned l = 1; l < hsize; ++l) {
-          ru = svdup_n_f32(v[j]);
-          iu = svdup_n_f32(v[j + 1]);
-          svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
-          svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
-
-          rn = svmla_f32_x(pg, rn, rl, ru);
-          rn = svmls_f32_x(pg, rn, il, iu);
-          in = svmla_f32_x(pg, in, rl, iu);
-          in = svmla_f32_x(pg, in, il, ru);
-          j += 2;
-        }
-
-        svst1_f32(pg, p0 + xss[k], rn);
-        svst1_f32(pg, p0 + xss[k] + vl, in);
-      }
-    };
-
-    uint64_t ms[H + 1];
-    uint64_t xss[1 << H];
-    FillIndices<H>(state.num_qubits(), qs, ms, xss);
-
-    uint64_t vl = svcntw();
-    const unsigned k_param = bits::Log2(vl) + H;
-    const unsigned n = state.num_qubits() > k_param ? state.num_qubits() - k_param : 0;
-    const uint64_t size = uint64_t{1} << n;
-
-    for_.Run(size, f, matrix, ms, xss, state.get());
-  }
-
-  template <unsigned H, unsigned L>
-  void ApplyGateL(
-      const std::vector<unsigned>& qs, const fp_type* matrix,
-      State& state) const {
-    constexpr unsigned gsize = 1 << (H + L);
-    constexpr unsigned hsize = 1 << H;
-    constexpr unsigned lsize = 1 << L;
-
-    uint64_t vl = svcntw();
-    unsigned nlb = bits::Log2(vl);
-    unsigned q0 = qs[0];
-
-    auto m = GetMasks11<L>(qs);
-    uint64_t qmaskl = m.qmaskl;
-
-    std::vector<fp_type> precomp_wre(hsize * gsize * vl);
-    std::vector<fp_type> precomp_wim(hsize * gsize * vl);
-
-    for (unsigned k = 0; k < hsize; ++k) {
-      for (unsigned l = 0; l < gsize; ++l) {
-        unsigned h_idx = l / lsize;
-        unsigned r_idx = l % lsize;
-        for (unsigned lane = 0; lane < vl; ++lane) {
-          unsigned s_out = bits::CompressBits((uint64_t)lane, nlb, qmaskl);
-          unsigned row = lsize * k + s_out;
-          unsigned col = lsize * h_idx + (s_out ^ r_idx);
-          precomp_wre[(k * gsize + l) * vl + lane] = matrix[2 * (row * gsize + col)];
-          precomp_wim[(k * gsize + l) * vl + lane] = matrix[2 * (row * gsize + col) + 1];
-        }
-      }
+      lane_offsets_buf[lane] = ii_lane * 2 * sizeof(fp_type);
     }
+    svuint64_t v_lane_offsets = svld1_u64(pg64, lane_offsets_buf);
 
-    auto f = [](unsigned n, unsigned m_idx, uint64_t i, const fp_type* wre_ptr,
-                const fp_type* wim_ptr, const uint64_t* ms, const uint64_t* xss,
-                uint64_t qmaskl, fp_type* rstate) {
-      constexpr unsigned gsize = 1 << (H + L);
-      constexpr unsigned hsize = 1 << H;
-      constexpr unsigned lsize = 1 << L;
-
-      svbool_t pg = svptrue_b32();
+    auto f = [](unsigned n, unsigned m_idx, uint64_t i_block, const fp_type* v,
+                const uint64_t* ms, const uint64_t* xss,
+                svuint64_t v_lane_offsets, fp_type* rstate) {
+      constexpr unsigned gsize = 1 << N;
+      uint64_t vl64 = svcntd();
+      svbool_t pg64 = svptrue_b64();
+      svbool_t pg32 = svptrue_b32();
       uint64_t vl = svcntw();
-      svuint32_t idx = svindex_u32(0, 1);
-      unsigned nlb = bits::Log2(vl);
 
-      i *= vl;
-      uint64_t ii = i & ms[0];
-      for (unsigned j = 1; j <= H; ++j) {
-        i *= 2; ii |= i & ms[j];
+      i_block *= vl64;
+      uint64_t ii_block = i_block & ms[0];
+      uint64_t shifted = i_block;
+      for (unsigned j = 1; j <= N; ++j) {
+        shifted *= 2;
+        ii_block |= shifted & ms[j];
       }
 
-      auto p0 = rstate + 2 * ii;
-      __builtin_prefetch(p0 + 64);
+      fp_type* p0 = rstate + 2 * ii_block;
 
-      alignas(64) fp_type tmp_rs[4096];
-      alignas(64) fp_type tmp_is[4096];
-
-      uint32_t flips[64];
-      for (unsigned r = 0; r < lsize; ++r) {
-        flips[r] = bits::ExpandBits((uint64_t)r, nlb, qmaskl);
-      }
-
-      for (unsigned k = 0; k < hsize; ++k) {
-        unsigned k2 = lsize * k;
-        svfloat32_t r0 = svld1_f32(pg, p0 + xss[k]);
-        svfloat32_t i0 = svld1_f32(pg, p0 + xss[k] + vl);
-
-        for (unsigned r = 0; r < lsize; ++r) {
-          svuint32_t perm = sveor_u32_z(pg, idx, svdup_n_u32(flips[r]));
-          svst1_f32(pg, tmp_rs + (k2 + r) * vl, svtbl_f32(r0, perm));
-          svst1_f32(pg, tmp_is + (k2 + r) * vl, svtbl_f32(i0, perm));
+      alignas(64) fp_type tmp[4096];
+      if constexpr (N > 2) {
+        for (unsigned k = 0; k < gsize; ++k) {
+          svfloat64_t gathered = svld1_gather_u64offset_f64(
+              pg64, (const double*)(p0 + xss[k]), v_lane_offsets);
+          svst1_f32(pg32, tmp + k * vl, svreinterpret_f32_f64(gathered));
         }
       }
 
-      for (unsigned k = 0; k < hsize; ) {
-        if (hsize - k >= 4) {
-          svfloat32_t rn0 = svdup_n_f32(0), in0 = svdup_n_f32(0);
-          svfloat32_t rn1 = svdup_n_f32(0), in1 = svdup_n_f32(0);
-          svfloat32_t rn2 = svdup_n_f32(0), in2 = svdup_n_f32(0);
-          svfloat32_t rn3 = svdup_n_f32(0), in3 = svdup_n_f32(0);
+      for (unsigned k = 0; k < gsize;) {
+        if (gsize - k >= 4) {
+          svfloat32_t rn0 = svdup_n_f32(0.0f);
+          svfloat32_t rn1 = svdup_n_f32(0.0f);
+          svfloat32_t rn2 = svdup_n_f32(0.0f);
+          svfloat32_t rn3 = svdup_n_f32(0.0f);
 
+          const double* p_v0 = (const double*)&v[2 * ((k + 0) * gsize)];
+          const double* p_v1 = (const double*)&v[2 * ((k + 1) * gsize)];
+          const double* p_v2 = (const double*)&v[2 * ((k + 2) * gsize)];
+          const double* p_v3 = (const double*)&v[2 * ((k + 3) * gsize)];
+#pragma GCC unroll 64
           for (unsigned l = 0; l < gsize; ++l) {
-            svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
-            svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
+            svfloat32_t sv_l;
+            if constexpr (N <= 2) {
+              sv_l = svreinterpret_f32_f64(svld1_gather_u64offset_f64(
+                  pg64, (const double*)(p0 + xss[l]), v_lane_offsets));
+            } else {
+              sv_l = svld1_f32(pg32, tmp + l * vl);
+            }
 
-            svfloat32_t wre0 = svld1_f32(pg, wre_ptr + ((k+0) * gsize + l) * vl);
-            svfloat32_t wim0 = svld1_f32(pg, wim_ptr + ((k+0) * gsize + l) * vl);
-            rn0 = svmla_f32_x(pg, rn0, rl, wre0); rn0 = svmls_f32_x(pg, rn0, il, wim0);
-            in0 = svmla_f32_x(pg, in0, rl, wim0); in0 = svmla_f32_x(pg, in0, il, wre0);
+            svfloat32_t m_kl0 = svreinterpret_f32_f64(svdup_n_f64(*p_v0++));
+            svfloat32_t m_kl1 = svreinterpret_f32_f64(svdup_n_f64(*p_v1++));
+            svfloat32_t m_kl2 = svreinterpret_f32_f64(svdup_n_f64(*p_v2++));
+            svfloat32_t m_kl3 = svreinterpret_f32_f64(svdup_n_f64(*p_v3++));
 
-            svfloat32_t wre1 = svld1_f32(pg, wre_ptr + ((k+1) * gsize + l) * vl);
-            svfloat32_t wim1 = svld1_f32(pg, wim_ptr + ((k+1) * gsize + l) * vl);
-            rn1 = svmla_f32_x(pg, rn1, rl, wre1); rn1 = svmls_f32_x(pg, rn1, il, wim1);
-            in1 = svmla_f32_x(pg, in1, rl, wim1); in1 = svmla_f32_x(pg, in1, il, wre1);
-
-            svfloat32_t wre2 = svld1_f32(pg, wre_ptr + ((k+2) * gsize + l) * vl);
-            svfloat32_t wim2 = svld1_f32(pg, wim_ptr + ((k+2) * gsize + l) * vl);
-            rn2 = svmla_f32_x(pg, rn2, rl, wre2); rn2 = svmls_f32_x(pg, rn2, il, wim2);
-            in2 = svmla_f32_x(pg, in2, rl, wim2); in2 = svmla_f32_x(pg, in2, il, wre2);
-
-            svfloat32_t wre3 = svld1_f32(pg, wre_ptr + ((k+3) * gsize + l) * vl);
-            svfloat32_t wim3 = svld1_f32(pg, wim_ptr + ((k+3) * gsize + l) * vl);
-            rn3 = svmla_f32_x(pg, rn3, rl, wre3); rn3 = svmls_f32_x(pg, rn3, il, wim3);
-            in3 = svmla_f32_x(pg, in3, rl, wim3); in3 = svmla_f32_x(pg, in3, il, wre3);
+            rn0 = svcmla_f32_x(pg32, rn0, sv_l, m_kl0, 0);
+            rn0 = svcmla_f32_x(pg32, rn0, sv_l, m_kl0, 90);
+            rn1 = svcmla_f32_x(pg32, rn1, sv_l, m_kl1, 0);
+            rn1 = svcmla_f32_x(pg32, rn1, sv_l, m_kl1, 90);
+            rn2 = svcmla_f32_x(pg32, rn2, sv_l, m_kl2, 0);
+            rn2 = svcmla_f32_x(pg32, rn2, sv_l, m_kl2, 90);
+            rn3 = svcmla_f32_x(pg32, rn3, sv_l, m_kl3, 0);
+            rn3 = svcmla_f32_x(pg32, rn3, sv_l, m_kl3, 90);
           }
 
-          svst1_f32(pg, p0 + xss[k+0], rn0); svst1_f32(pg, p0 + xss[k+0] + vl, in0);
-          svst1_f32(pg, p0 + xss[k+1], rn1); svst1_f32(pg, p0 + xss[k+1] + vl, in1);
-          svst1_f32(pg, p0 + xss[k+2], rn2); svst1_f32(pg, p0 + xss[k+2] + vl, in2);
-          svst1_f32(pg, p0 + xss[k+3], rn3); svst1_f32(pg, p0 + xss[k+3] + vl, in3);
+          QSIM_SVE_SCATTER_STEP(0)
+          QSIM_SVE_SCATTER_STEP(1)
+          QSIM_SVE_SCATTER_STEP(2)
+          QSIM_SVE_SCATTER_STEP(3)
           k += 4;
-        } else if (hsize - k >= 2) {
-          svfloat32_t rn0 = svdup_n_f32(0), in0 = svdup_n_f32(0);
-          svfloat32_t rn1 = svdup_n_f32(0), in1 = svdup_n_f32(0);
+        } else if (gsize - k >= 2) {
+          svfloat32_t rn0 = svdup_n_f32(0.0f);
+          svfloat32_t rn1 = svdup_n_f32(0.0f);
 
+          const double* p_v0 = (const double*)&v[2 * ((k + 0) * gsize)];
+          const double* p_v1 = (const double*)&v[2 * ((k + 1) * gsize)];
+#pragma GCC unroll 64
           for (unsigned l = 0; l < gsize; ++l) {
-            svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
-            svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
+            svfloat32_t sv_l;
+            if constexpr (N <= 2) {
+              sv_l = svreinterpret_f32_f64(svld1_gather_u64offset_f64(
+                  pg64, (const double*)(p0 + xss[l]), v_lane_offsets));
+            } else {
+              sv_l = svld1_f32(pg32, tmp + l * vl);
+            }
 
-            svfloat32_t wre0 = svld1_f32(pg, wre_ptr + ((k+0) * gsize + l) * vl);
-            svfloat32_t wim0 = svld1_f32(pg, wim_ptr + ((k+0) * gsize + l) * vl);
-            rn0 = svmla_f32_x(pg, rn0, rl, wre0); rn0 = svmls_f32_x(pg, rn0, il, wim0);
-            in0 = svmla_f32_x(pg, in0, rl, wim0); in0 = svmla_f32_x(pg, in0, il, wre0);
+            svfloat32_t m_kl0 = svreinterpret_f32_f64(svdup_n_f64(*p_v0++));
+            svfloat32_t m_kl1 = svreinterpret_f32_f64(svdup_n_f64(*p_v1++));
 
-            svfloat32_t wre1 = svld1_f32(pg, wre_ptr + ((k+1) * gsize + l) * vl);
-            svfloat32_t wim1 = svld1_f32(pg, wim_ptr + ((k+1) * gsize + l) * vl);
-            rn1 = svmla_f32_x(pg, rn1, rl, wre1); rn1 = svmls_f32_x(pg, rn1, il, wim1);
-            in1 = svmla_f32_x(pg, in1, rl, wim1); in1 = svmla_f32_x(pg, in1, il, wre1);
+            rn0 = svcmla_f32_x(pg32, rn0, sv_l, m_kl0, 0);
+            rn0 = svcmla_f32_x(pg32, rn0, sv_l, m_kl0, 90);
+            rn1 = svcmla_f32_x(pg32, rn1, sv_l, m_kl1, 0);
+            rn1 = svcmla_f32_x(pg32, rn1, sv_l, m_kl1, 90);
           }
 
-          svst1_f32(pg, p0 + xss[k+0], rn0); svst1_f32(pg, p0 + xss[k+0] + vl, in0);
-          svst1_f32(pg, p0 + xss[k+1], rn1); svst1_f32(pg, p0 + xss[k+1] + vl, in1);
+          QSIM_SVE_SCATTER_STEP(0)
+          QSIM_SVE_SCATTER_STEP(1)
           k += 2;
         } else {
-          svfloat32_t rn0 = svdup_n_f32(0), in0 = svdup_n_f32(0);
+          svfloat32_t rn0 = svdup_n_f32(0.0f);
 
+          const double* p_v0 = (const double*)&v[2 * ((k + 0) * gsize)];
+#pragma GCC unroll 64
           for (unsigned l = 0; l < gsize; ++l) {
-            svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
-            svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
+            svfloat32_t sv_l;
+            if constexpr (N <= 2) {
+              sv_l = svreinterpret_f32_f64(svld1_gather_u64offset_f64(
+                  pg64, (const double*)(p0 + xss[l]), v_lane_offsets));
+            } else {
+              sv_l = svld1_f32(pg32, tmp + l * vl);
+            }
 
-            svfloat32_t wre0 = svld1_f32(pg, wre_ptr + ((k+0) * gsize + l) * vl);
-            svfloat32_t wim0 = svld1_f32(pg, wim_ptr + ((k+0) * gsize + l) * vl);
-            rn0 = svmla_f32_x(pg, rn0, rl, wre0); rn0 = svmls_f32_x(pg, rn0, il, wim0);
-            in0 = svmla_f32_x(pg, in0, rl, wim0); in0 = svmla_f32_x(pg, in0, il, wre0);
+            QSIM_SVE_COMPUTE_STEP(0)
           }
 
-          svst1_f32(pg, p0 + xss[k+0], rn0); svst1_f32(pg, p0 + xss[k+0] + vl, in0);
+          QSIM_SVE_SCATTER_STEP(0)
           k += 1;
         }
       }
     };
 
-    uint64_t ms[H + 1];
-    uint64_t xss[1 << H];
-    FillIndices<H, L>(state.num_qubits(), qs, ms, xss);
-
-    const unsigned k_param = bits::Log2(vl) + H;
-    const unsigned n = state.num_qubits() > k_param ? state.num_qubits() - k_param : 0;
+    const unsigned k_param = bits::Log2(vl64) + N;
+    const unsigned n =
+        state.num_qubits() > k_param ? state.num_qubits() - k_param : 0;
     const uint64_t size = uint64_t{1} << n;
 
-    for_.Run(size, f, precomp_wre.data(), precomp_wim.data(), ms, xss, qmaskl, state.get());
+    for_.Run(size, f, matrix, ms, xss, v_lane_offsets, state.get());
   }
 
-  template <unsigned H>
-  void ApplyControlledGateH(
-      const std::vector<unsigned>& qs, const fp_type* matrix,
-      uint64_t cvalsh, uint64_t cmaskh, State& state) const {
-    auto f = [](unsigned n, unsigned m, uint64_t i, const fp_type* v,
-                const uint64_t* ms, const uint64_t* xss, uint64_t cvalsh,
-                uint64_t cmaskh, fp_type* rstate) {
-      constexpr unsigned hsize = 1 << H;
-      uint64_t vl = svcntw();
-      svbool_t pg = svptrue_b32();
-
-      i *= vl;
-      uint64_t ii = i & ms[0];
-      for (unsigned j = 1; j <= H; ++j) {
-        i *= 2; ii |= i & ms[j];
-      }
-
-      if ((ii & cmaskh) != cvalsh) return;
-
-      auto p0 = rstate + 2 * ii;
-      __builtin_prefetch(p0 + 64);
-
-      alignas(64) fp_type tmp_rs[4096];
-      alignas(64) fp_type tmp_is[4096];
-
-      for (unsigned k = 0; k < hsize; ++k) {
-        svst1_f32(pg, tmp_rs + k * vl, svld1_f32(pg, p0 + xss[k]));
-        svst1_f32(pg, tmp_is + k * vl, svld1_f32(pg, p0 + xss[k] + vl));
-      }
-
-      uint64_t j = 0;
-
-      for (unsigned k = 0; k < hsize; ++k) {
-        svfloat32_t ru = svdup_n_f32(v[j]);
-        svfloat32_t iu = svdup_n_f32(v[j + 1]);
-        svfloat32_t rn = svmul_f32_x(pg, svld1_f32(pg, tmp_rs + 0 * vl), ru);
-        svfloat32_t in = svmul_f32_x(pg, svld1_f32(pg, tmp_rs + 0 * vl), iu);
-        rn = svmls_f32_x(pg, rn, svld1_f32(pg, tmp_is + 0 * vl), iu);
-        in = svmla_f32_x(pg, in, svld1_f32(pg, tmp_is + 0 * vl), ru);
-        j += 2;
-
-        for (unsigned l = 1; l < hsize; ++l) {
-          ru = svdup_n_f32(v[j]);
-          iu = svdup_n_f32(v[j + 1]);
-          svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
-          svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
-
-          rn = svmla_f32_x(pg, rn, rl, ru);
-          rn = svmls_f32_x(pg, rn, il, iu);
-          in = svmla_f32_x(pg, in, rl, iu);
-          in = svmla_f32_x(pg, in, il, ru);
-          j += 2;
-        }
-
-        svst1_f32(pg, p0 + xss[k], rn);
-        svst1_f32(pg, p0 + xss[k] + vl, in);
-      }
-    };
-
-    uint64_t ms[H + 1];
-    uint64_t xss[1 << H];
-    FillIndices<H>(state.num_qubits(), qs, ms, xss);
-
-    uint64_t vl = svcntw();
-    const unsigned k_param = bits::Log2(vl) + H;
-    const unsigned n = state.num_qubits() > k_param ? state.num_qubits() - k_param : 0;
-    const uint64_t size = uint64_t{1} << n;
-
-    for_.Run(size, f, matrix, ms, xss, cvalsh, cmaskh, state.get());
-  }
-
-  template <unsigned H>
-  void ApplyControlledGateHL(
-      const std::vector<unsigned>& qs, const std::vector<unsigned>& cqs,
-      uint64_t cvals, const fp_type* matrix, uint64_t cvalsh, uint64_t cmaskh,
-      State& state) const {
-    auto f = [](unsigned n, unsigned m_idx, uint64_t i, const fp_type* v,
-                const uint64_t* ms, const uint64_t* xss, uint64_t cvalsh,
-                uint64_t cmaskh, uint64_t cvalsl, uint64_t cmaskl,
-                fp_type* rstate) {
-      constexpr unsigned hsize = 1 << H;
-      uint64_t vl = svcntw();
-      svbool_t pg = svptrue_b32();
-      svuint32_t idx = svindex_u32(0, 1);
-      unsigned nlb = bits::Log2(vl);
-
-      i *= vl;
-      uint64_t ii = i & ms[0];
-      for (unsigned j = 1; j <= H; ++j) {
-        i *= 2; ii |= i & ms[j];
-      }
-
-      if ((ii & cmaskh) != cvalsh) return;
-
-      auto p0 = rstate + 2 * ii;
-      __builtin_prefetch(p0 + 64);
-
-      alignas(64) fp_type tmp_rs[4096];
-      alignas(64) fp_type tmp_is[4096];
-
-      for (unsigned k = 0; k < hsize; ++k) {
-        svst1_f32(pg, tmp_rs + k * vl, svld1_f32(pg, p0 + xss[k]));
-        svst1_f32(pg, tmp_is + k * vl, svld1_f32(pg, p0 + xss[k] + vl));
-      }
-
-      svuint32_t expanded = svdup_n_u32(0);
-      for (unsigned b = 0; b < 16; ++b) {
-        if ((cmaskl >> b) & 1) {
-          uint32_t bit = bits::ExpandBits((uint64_t)b, 16, cmaskl);
-          if ((cvalsl >> b) & 1) {
-            expanded = svorr_u32_z(pg, expanded, svdup_n_u32(bit));
-          }
-        }
-      }
-      svbool_t c_match = svcmpeq_u32(pg, svand_u32_z(pg, idx, svdup_n_u32(cmaskl)), expanded);
-
-      for (unsigned k = 0; k < hsize; ) {
-        if (hsize - k >= 2) {
-          svfloat32_t rn0 = svld1_f32(pg, tmp_rs + (k+0) * vl);
-          svfloat32_t in0 = svld1_f32(pg, tmp_is + (k+0) * vl);
-          svfloat32_t rn1 = svld1_f32(pg, tmp_rs + (k+1) * vl);
-          svfloat32_t in1 = svld1_f32(pg, tmp_is + (k+1) * vl);
-
-          svfloat32_t rn_new0 = svdup_n_f32(0), in_new0 = svdup_n_f32(0);
-          svfloat32_t rn_new1 = svdup_n_f32(0), in_new1 = svdup_n_f32(0);
-          uint64_t j0 = 2 * ((k+0) * hsize);
-          uint64_t j1 = 2 * ((k+1) * hsize);
-
-          for (unsigned l = 0; l < hsize; ++l) {
-            svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
-            svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
-
-            svfloat32_t ru0 = svdup_n_f32(v[j0]);
-            svfloat32_t iu0 = svdup_n_f32(v[j0 + 1]);
-            rn_new0 = svmla_f32_x(pg, rn_new0, rl, ru0); rn_new0 = svmls_f32_x(pg, rn_new0, il, iu0);
-            in_new0 = svmla_f32_x(pg, in_new0, rl, iu0); in_new0 = svmla_f32_x(pg, in_new0, il, ru0);
-
-            svfloat32_t ru1 = svdup_n_f32(v[j1]);
-            svfloat32_t iu1 = svdup_n_f32(v[j1 + 1]);
-            rn_new1 = svmla_f32_x(pg, rn_new1, rl, ru1); rn_new1 = svmls_f32_x(pg, rn_new1, il, iu1);
-            in_new1 = svmla_f32_x(pg, in_new1, rl, iu1); in_new1 = svmla_f32_x(pg, in_new1, il, ru1);
-            j0 += 2; j1 += 2;
-          }
-
-          rn0 = svsel_f32(c_match, rn_new0, rn0); in0 = svsel_f32(c_match, in_new0, in0);
-          rn1 = svsel_f32(c_match, rn_new1, rn1); in1 = svsel_f32(c_match, in_new1, in1);
-
-          svst1_f32(pg, p0 + xss[k+0], rn0); svst1_f32(pg, p0 + xss[k+0] + vl, in0);
-          svst1_f32(pg, p0 + xss[k+1], rn1); svst1_f32(pg, p0 + xss[k+1] + vl, in1);
-          k += 2;
-        } else {
-          svfloat32_t rn = svld1_f32(pg, tmp_rs + k * vl);
-          svfloat32_t in = svld1_f32(pg, tmp_is + k * vl);
-
-          svfloat32_t rn_new = svdup_n_f32(0);
-          svfloat32_t in_new = svdup_n_f32(0);
-          uint64_t j = 2 * (k * hsize);
-
-          for (unsigned l = 0; l < hsize; ++l) {
-            svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
-            svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
-
-            svfloat32_t ru = svdup_n_f32(v[j]);
-            svfloat32_t iu = svdup_n_f32(v[j + 1]);
-
-            rn_new = svmla_f32_x(pg, rn_new, rl, ru);
-            rn_new = svmls_f32_x(pg, rn_new, il, iu);
-            in_new = svmla_f32_x(pg, in_new, rl, iu);
-            in_new = svmla_f32_x(pg, in_new, il, ru);
-            j += 2;
-          }
-
-          rn = svsel_f32(c_match, rn_new, rn);
-          in = svsel_f32(c_match, in_new, in);
-
-          svst1_f32(pg, p0 + xss[k], rn);
-          svst1_f32(pg, p0 + xss[k] + vl, in);
-          k += 1;
-        }
-      }
-    };
-
-    uint64_t ms[H + 1];
-    uint64_t xss[1 << H];
-    FillIndices<H>(state.num_qubits(), qs, ms, xss);
-
-    auto m = GetMasks8(state.num_qubits(), qs, cqs, cvals);
-
-    uint64_t vl = svcntw();
-    const unsigned k_param = bits::Log2(vl) + H;
-    const unsigned n = state.num_qubits() > k_param ? state.num_qubits() - k_param : 0;
-    const uint64_t size = uint64_t{1} << n;
-
-    for_.Run(size, f, matrix, ms, xss, m.cvalsh, m.cmaskh, m.cvalsl, m.cmaskl, state.get());
-  }
-
-  template <unsigned H, unsigned L, bool CH>
-  void ApplyControlledGateL(
+  template <unsigned N>
+  void ApplyControlledGateCore(
       const std::vector<unsigned>& qs, const std::vector<unsigned>& cqs,
       uint64_t cvals, const fp_type* matrix, State& state) const {
-    constexpr unsigned gsize = 1 << (H + L);
-    constexpr unsigned hsize = 1 << H;
-    constexpr unsigned lsize = 1 << L;
+    constexpr unsigned gsize = 1 << N;
+    uint64_t vl64 = svcntd();
+    svbool_t pg64 = svptrue_b64();
 
-    uint64_t vl = svcntw();
-    unsigned nlb = bits::Log2(vl);
-    unsigned q0 = qs[0];
+    unsigned log_vl64 = bits::Log2(vl64);
+    unsigned cl = 0;
+    uint64_t cmaskh = 0;
+    uint64_t cmaskl = 0;
 
-    auto m = GetMasks9<L>(state.num_qubits(), qs, cqs, cvals);
-    uint64_t qmaskl = m.qmaskl;
-
-    std::vector<fp_type> precomp_wre(hsize * gsize * vl);
-    std::vector<fp_type> precomp_wim(hsize * gsize * vl);
-
-    for (unsigned k = 0; k < hsize; ++k) {
-      for (unsigned l = 0; l < gsize; ++l) {
-        unsigned h_idx = l / lsize;
-        unsigned r_idx = l % lsize;
-        for (unsigned lane = 0; lane < vl; ++lane) {
-          unsigned s_out = bits::CompressBits((uint64_t)lane, nlb, qmaskl);
-          unsigned row = lsize * k + s_out;
-          unsigned col = lsize * h_idx + (s_out ^ r_idx);
-          precomp_wre[(k * gsize + l) * vl + lane] = matrix[2 * (row * gsize + col)];
-          precomp_wim[(k * gsize + l) * vl + lane] = matrix[2 * (row * gsize + col) + 1];
-        }
+    for (auto q : cqs) {
+      if (q >= log_vl64) {
+        cmaskh |= uint64_t{1} << q;
+      } else {
+        ++cl;
+        cmaskl |= uint64_t{1} << q;
       }
     }
 
-    auto f = [](unsigned n, unsigned m_idx, uint64_t i, const fp_type* wre_ptr,
-                const fp_type* wim_ptr, const uint64_t* ms, const uint64_t* xss,
-                uint64_t qmaskl, uint64_t cvalsh, uint64_t cmaskh, uint64_t cvalsl, uint64_t cmaskl,
-                fp_type* rstate) {
-      constexpr unsigned gsize = 1 << (H + L);
-      constexpr unsigned hsize = 1 << H;
-      constexpr unsigned lsize = 1 << L;
+    uint64_t cvalsh = bits::ExpandBits(cvals >> cl, state.num_qubits(), cmaskh);
+    uint64_t cvalsl =
+        bits::ExpandBits(cvals & ((1 << cl) - 1), log_vl64, cmaskl);
 
-      svbool_t pg = svptrue_b32();
+    uint64_t ms[N + 1];
+    uint64_t xss[gsize];
+    FillIndices<N>(state.num_qubits(), qs, ms, xss);
+
+    uint64_t lane_offsets_buf[64];
+    for (uint64_t lane = 0; lane < vl64; ++lane) {
+      uint64_t shifted = lane;
+      uint64_t ii_lane = lane & ms[0];
+      for (unsigned j = 1; j <= N; ++j) {
+        shifted *= 2;
+        ii_lane |= shifted & ms[j];
+      }
+      lane_offsets_buf[lane] = ii_lane * 2 * sizeof(fp_type);
+    }
+    svuint64_t v_lane_offsets = svld1_u64(pg64, lane_offsets_buf);
+
+    auto f = [](unsigned n, unsigned m_idx, uint64_t i_block, const fp_type* v,
+                const uint64_t* ms, const uint64_t* xss,
+                svuint64_t v_lane_offsets, uint64_t cvalsh, uint64_t cmaskh,
+                uint64_t cvalsl, uint64_t cmaskl, fp_type* rstate) {
+      constexpr unsigned gsize = 1 << N;
+      uint64_t vl64 = svcntd();
+      svbool_t pg64 = svptrue_b64();
+      svbool_t pg32 = svptrue_b32();
       uint64_t vl = svcntw();
-      svuint32_t idx = svindex_u32(0, 1);
-      unsigned nlb = bits::Log2(vl);
+      svuint32_t idx = svlsr_n_u32_x(pg32, svindex_u32(0, 1), 1);
 
-      i *= vl;
-      uint64_t ii = i & ms[0];
-      for (unsigned j = 1; j <= H; ++j) {
-        i *= 2; ii |= i & ms[j];
+      i_block *= vl64;
+      uint64_t ii_block = i_block & ms[0];
+      uint64_t shifted = i_block;
+      for (unsigned j = 1; j <= N; ++j) {
+        shifted *= 2;
+        ii_block |= shifted & ms[j];
       }
 
-      if ((ii & cmaskh) != cvalsh) return;
+      if ((ii_block & cmaskh) != cvalsh) return;
 
-      auto p0 = rstate + 2 * ii;
-      __builtin_prefetch(p0 + 64);
+      fp_type* p0 = rstate + 2 * ii_block;
 
-      alignas(64) fp_type tmp_rs[4096];
-      alignas(64) fp_type tmp_is[4096];
-
-      uint32_t flips[64];
-      for (unsigned r = 0; r < lsize; ++r) {
-        flips[r] = bits::ExpandBits((uint64_t)r, nlb, qmaskl);
-      }
-
-      for (unsigned k = 0; k < hsize; ++k) {
-        unsigned k2 = lsize * k;
-        svfloat32_t r0 = svld1_f32(pg, p0 + xss[k]);
-        svfloat32_t i0 = svld1_f32(pg, p0 + xss[k] + vl);
-
-        for (unsigned r = 0; r < lsize; ++r) {
-          svuint32_t perm = sveor_u32_z(pg, idx, svdup_n_u32(flips[r]));
-          svst1_f32(pg, tmp_rs + (k2 + r) * vl, svtbl_f32(r0, perm));
-          svst1_f32(pg, tmp_is + (k2 + r) * vl, svtbl_f32(i0, perm));
+      alignas(64) fp_type tmp[4096];
+      if constexpr (N > 2) {
+        for (unsigned k = 0; k < gsize; ++k) {
+          svfloat64_t gathered = svld1_gather_u64offset_f64(
+              pg64, (const double*)(p0 + xss[k]), v_lane_offsets);
+          svst1_f32(pg32, tmp + k * vl, svreinterpret_f32_f64(gathered));
         }
       }
 
@@ -659,251 +446,232 @@ class SimulatorSVE2 final : public SimulatorBase {
         if ((cmaskl >> b) & 1) {
           uint32_t bit = bits::ExpandBits((uint64_t)b, 16, cmaskl);
           if ((cvalsl >> b) & 1) {
-            expanded = svorr_u32_z(pg, expanded, svdup_n_u32(bit));
+            expanded = svorr_u32_z(pg32, expanded, svdup_n_u32(bit));
           }
         }
       }
-      svbool_t c_match = svcmpeq_u32(pg, svand_u32_z(pg, idx, svdup_n_u32(cmaskl)), expanded);
+      svbool_t c_match = svcmpeq_u32(
+          pg32, svand_u32_z(pg32, idx, svdup_n_u32(cmaskl)), expanded);
 
-      for (unsigned k = 0; k < hsize; ++k) {
-        svfloat32_t rn = svld1_f32(pg, tmp_rs + k * lsize * vl);
-        svfloat32_t in = svld1_f32(pg, tmp_is + k * lsize * vl);
+      for (unsigned k = 0; k < gsize;) {
+        if (gsize - k >= 4) {
+          svfloat32_t rn0 = svdup_n_f32(0.0f);
+          svfloat32_t rn1 = svdup_n_f32(0.0f);
+          svfloat32_t rn2 = svdup_n_f32(0.0f);
+          svfloat32_t rn3 = svdup_n_f32(0.0f);
 
-        svfloat32_t rn_new = svdup_n_f32(0);
-        svfloat32_t in_new = svdup_n_f32(0);
+          const double* p_v0 = (const double*)&v[2 * ((k + 0) * gsize)];
+          const double* p_v1 = (const double*)&v[2 * ((k + 1) * gsize)];
+          const double* p_v2 = (const double*)&v[2 * ((k + 2) * gsize)];
+          const double* p_v3 = (const double*)&v[2 * ((k + 3) * gsize)];
+#pragma GCC unroll 64
+          for (unsigned l = 0; l < gsize; ++l) {
+            svfloat32_t sv_l;
+            if constexpr (N <= 2) {
+              sv_l = svreinterpret_f32_f64(svld1_gather_u64offset_f64(
+                  pg64, (const double*)(p0 + xss[l]), v_lane_offsets));
+            } else {
+              sv_l = svld1_f32(pg32, tmp + l * vl);
+            }
 
-        for (unsigned l = 0; l < gsize; ++l) {
-          svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
-          svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
+            svfloat32_t m_kl0 = svreinterpret_f32_f64(svdup_n_f64(*p_v0++));
+            svfloat32_t m_kl1 = svreinterpret_f32_f64(svdup_n_f64(*p_v1++));
+            svfloat32_t m_kl2 = svreinterpret_f32_f64(svdup_n_f64(*p_v2++));
+            svfloat32_t m_kl3 = svreinterpret_f32_f64(svdup_n_f64(*p_v3++));
 
-          svfloat32_t wre = svld1_f32(pg, wre_ptr + (k * gsize + l) * vl);
-          svfloat32_t wim = svld1_f32(pg, wim_ptr + (k * gsize + l) * vl);
+            rn0 = svcmla_f32_x(pg32, rn0, sv_l, m_kl0, 0);
+            rn0 = svcmla_f32_x(pg32, rn0, sv_l, m_kl0, 90);
+            rn1 = svcmla_f32_x(pg32, rn1, sv_l, m_kl1, 0);
+            rn1 = svcmla_f32_x(pg32, rn1, sv_l, m_kl1, 90);
+            rn2 = svcmla_f32_x(pg32, rn2, sv_l, m_kl2, 0);
+            rn2 = svcmla_f32_x(pg32, rn2, sv_l, m_kl2, 90);
+            rn3 = svcmla_f32_x(pg32, rn3, sv_l, m_kl3, 0);
+            rn3 = svcmla_f32_x(pg32, rn3, sv_l, m_kl3, 90);
+          }
 
-          rn_new = svmla_f32_x(pg, rn_new, rl, wre);
-          rn_new = svmls_f32_x(pg, rn_new, il, wim);
-          in_new = svmla_f32_x(pg, in_new, rl, wim);
-          in_new = svmla_f32_x(pg, in_new, il, wre);
+          QSIM_SVE_CTRL_ORG_STEP(0)
+          QSIM_SVE_CTRL_ORG_STEP(1)
+          QSIM_SVE_CTRL_ORG_STEP(2)
+          QSIM_SVE_CTRL_ORG_STEP(3)
+
+          QSIM_SVE_SCATTER_STEP(0)
+          QSIM_SVE_SCATTER_STEP(1)
+          QSIM_SVE_SCATTER_STEP(2)
+          QSIM_SVE_SCATTER_STEP(3)
+          k += 4;
+        } else if (gsize - k >= 2) {
+          svfloat32_t rn0 = svdup_n_f32(0.0f);
+          svfloat32_t rn1 = svdup_n_f32(0.0f);
+
+          const double* p_v0 = (const double*)&v[2 * ((k + 0) * gsize)];
+          const double* p_v1 = (const double*)&v[2 * ((k + 1) * gsize)];
+#pragma GCC unroll 64
+          for (unsigned l = 0; l < gsize; ++l) {
+            svfloat32_t sv_l;
+            if constexpr (N <= 2) {
+              sv_l = svreinterpret_f32_f64(svld1_gather_u64offset_f64(
+                  pg64, (const double*)(p0 + xss[l]), v_lane_offsets));
+            } else {
+              sv_l = svld1_f32(pg32, tmp + l * vl);
+            }
+
+            svfloat32_t m_kl0 = svreinterpret_f32_f64(svdup_n_f64(*p_v0++));
+            svfloat32_t m_kl1 = svreinterpret_f32_f64(svdup_n_f64(*p_v1++));
+
+            rn0 = svcmla_f32_x(pg32, rn0, sv_l, m_kl0, 0);
+            rn0 = svcmla_f32_x(pg32, rn0, sv_l, m_kl0, 90);
+            rn1 = svcmla_f32_x(pg32, rn1, sv_l, m_kl1, 0);
+            rn1 = svcmla_f32_x(pg32, rn1, sv_l, m_kl1, 90);
+          }
+
+          QSIM_SVE_CTRL_ORG_STEP(0)
+          QSIM_SVE_CTRL_ORG_STEP(1)
+
+          QSIM_SVE_SCATTER_STEP(0)
+          QSIM_SVE_SCATTER_STEP(1)
+          k += 2;
+        } else {
+          svfloat32_t rn0 = svdup_n_f32(0.0f);
+
+          const double* p_v0 = (const double*)&v[2 * ((k + 0) * gsize)];
+#pragma GCC unroll 64
+          for (unsigned l = 0; l < gsize; ++l) {
+            svfloat32_t sv_l;
+            if constexpr (N <= 2) {
+              sv_l = svreinterpret_f32_f64(svld1_gather_u64offset_f64(
+                  pg64, (const double*)(p0 + xss[l]), v_lane_offsets));
+            } else {
+              sv_l = svld1_f32(pg32, tmp + l * vl);
+            }
+
+            QSIM_SVE_COMPUTE_STEP(0)
+          }
+
+          svfloat32_t org0;
+          if constexpr (N <= 2) {
+            org0 = svreinterpret_f32_f64(svld1_gather_u64offset_f64(
+                pg64, (const double*)(p0 + xss[k + 0]), v_lane_offsets));
+          } else {
+            org0 = svld1_f32(pg32, tmp + (k + 0) * vl);
+          }
+          rn0 = svsel_f32(c_match, rn0, org0);
+
+          QSIM_SVE_SCATTER_STEP(0)
+          k += 1;
         }
-
-        rn = svsel_f32(c_match, rn_new, rn);
-        in = svsel_f32(c_match, in_new, in);
-
-        svst1_f32(pg, p0 + xss[k], rn);
-        svst1_f32(pg, p0 + xss[k] + vl, in);
       }
     };
 
-    uint64_t ms[H + 1];
-    uint64_t xss[1 << H];
-    FillIndices<H, L>(state.num_qubits(), qs, ms, xss);
-
-    uint64_t cvalsl = m.cvalsl;
-    uint64_t cmaskl = m.cmaskl;
-
-    const unsigned k_param = bits::Log2(vl) + H;
-    const unsigned n = state.num_qubits() > k_param ? state.num_qubits() - k_param : 0;
+    const unsigned k_param = bits::Log2(vl64) + N + cqs.size();
+    const unsigned n =
+        state.num_qubits() > k_param ? state.num_qubits() - k_param : 0;
     const uint64_t size = uint64_t{1} << n;
 
-    for_.Run(size, f, precomp_wre.data(), precomp_wim.data(), ms, xss, qmaskl, m.cvalsh, m.cmaskh, cvalsl, cmaskl, state.get());
+    for_.Run(
+        size, f, matrix, ms, xss, v_lane_offsets, cvalsh, cmaskh, cvalsl,
+        cmaskl, state.get());
   }
 
-  template <unsigned H>
-  std::complex<double> ExpectationValueH(
+  template <unsigned N>
+  std::complex<double> ExpectationValueCore(
       const std::vector<unsigned>& qs, const fp_type* matrix,
       const State& state) const {
-    auto f = [](unsigned n, unsigned m, uint64_t i, const fp_type* v,
-                const uint64_t* ms, const uint64_t* xss,
-                const fp_type* rstate) -> std::complex<double> {
-      constexpr unsigned hsize = 1 << H;
-      uint64_t vl = svcntw();
-      svbool_t pg = svptrue_b32();
+    constexpr unsigned gsize = 1 << N;
+    uint64_t vl64 = svcntd();
+    svbool_t pg64 = svptrue_b64();
 
-      i *= vl;
-      uint64_t ii = i & ms[0];
-      for (unsigned j = 1; j <= H; ++j) {
-        i *= 2; ii |= i & ms[j];
+    uint64_t ms[N + 1];
+    uint64_t xss[gsize];
+    FillIndices<N>(state.num_qubits(), qs, ms, xss);
+
+    uint64_t lane_offsets_buf[64];
+    for (uint64_t lane = 0; lane < vl64; ++lane) {
+      uint64_t shifted = lane;
+      uint64_t ii_lane = lane & ms[0];
+      for (unsigned j = 1; j <= N; ++j) {
+        shifted *= 2;
+        ii_lane |= shifted & ms[j];
       }
-
-      auto p0 = rstate + 2 * ii;
-      __builtin_prefetch(p0 + 64);
-
-      alignas(64) fp_type tmp_rs[4096];
-      alignas(64) fp_type tmp_is[4096];
-
-      for (unsigned k = 0; k < hsize; ++k) {
-        svst1_f32(pg, tmp_rs + k * vl, svld1_f32(pg, p0 + xss[k]));
-        svst1_f32(pg, tmp_is + k * vl, svld1_f32(pg, p0 + xss[k] + vl));
-      }
-
-      svfloat32_t acc_re = svdup_n_f32(0);
-      svfloat32_t acc_im = svdup_n_f32(0);
-
-      uint64_t j = 0;
-
-      for (unsigned k = 0; k < hsize; ++k) {
-        svfloat32_t ru = svdup_n_f32(v[j]);
-        svfloat32_t iu = svdup_n_f32(v[j + 1]);
-        svfloat32_t rn = svmul_f32_x(pg, svld1_f32(pg, tmp_rs + 0 * vl), ru);
-        svfloat32_t in = svmul_f32_x(pg, svld1_f32(pg, tmp_rs + 0 * vl), iu);
-        rn = svmls_f32_x(pg, rn, svld1_f32(pg, tmp_is + 0 * vl), iu);
-        in = svmla_f32_x(pg, in, svld1_f32(pg, tmp_is + 0 * vl), ru);
-        j += 2;
-
-        for (unsigned l = 1; l < hsize; ++l) {
-          ru = svdup_n_f32(v[j]);
-          iu = svdup_n_f32(v[j + 1]);
-          svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
-          svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
-
-          rn = svmla_f32_x(pg, rn, rl, ru);
-          rn = svmls_f32_x(pg, rn, il, iu);
-          in = svmla_f32_x(pg, in, rl, iu);
-          in = svmla_f32_x(pg, in, il, ru);
-          j += 2;
-        }
-
-        svfloat32_t rk = svld1_f32(pg, tmp_rs + k * vl);
-        svfloat32_t ik = svld1_f32(pg, tmp_is + k * vl);
-
-        acc_re = svmla_f32_x(pg, acc_re, rk, rn);
-        acc_re = svmla_f32_x(pg, acc_re, ik, in);
-        acc_im = svmla_f32_x(pg, acc_im, rk, in);
-        acc_im = svmls_f32_x(pg, acc_im, ik, rn);
-      }
-
-      return std::complex<double>((double)svaddv_f32(pg, acc_re),
-                                  (double)svaddv_f32(pg, acc_im));
-    };
-
-    uint64_t ms[H + 1];
-    uint64_t xss[1 << H];
-    FillIndices<H>(state.num_qubits(), qs, ms, xss);
-
-    uint64_t vl = svcntw();
-    const unsigned k_param = bits::Log2(vl) + H;
-    const unsigned n = state.num_qubits() > k_param ? state.num_qubits() - k_param : 0;
-    const uint64_t size = uint64_t{1} << n;
-
-    using Op = std::plus<std::complex<double>>;
-    return for_.RunReduce(size, f, Op(), matrix, ms, xss, state.get());
-  }
-
-  template <unsigned H, unsigned L>
-  std::complex<double> ExpectationValueL(
-      const std::vector<unsigned>& qs, const fp_type* matrix,
-      const State& state) const {
-    constexpr unsigned gsize = 1 << (H + L);
-    constexpr unsigned hsize = 1 << H;
-    constexpr unsigned lsize = 1 << L;
-
-    uint64_t vl = svcntw();
-    unsigned nlb = bits::Log2(vl);
-    unsigned q0 = qs[0];
-
-    auto m = GetMasks11<L>(qs);
-    uint64_t qmaskl = m.qmaskl;
-
-    std::vector<fp_type> precomp_wre(hsize * gsize * vl);
-    std::vector<fp_type> precomp_wim(hsize * gsize * vl);
-
-    for (unsigned k = 0; k < hsize; ++k) {
-      for (unsigned l = 0; l < gsize; ++l) {
-        unsigned h_idx = l / lsize;
-        unsigned r_idx = l % lsize;
-        for (unsigned lane = 0; lane < vl; ++lane) {
-          unsigned s_out = bits::CompressBits((uint64_t)lane, nlb, qmaskl);
-          unsigned row = lsize * k + s_out;
-          unsigned col = lsize * h_idx + (s_out ^ r_idx);
-          precomp_wre[(k * gsize + l) * vl + lane] = matrix[2 * (row * gsize + col)];
-          precomp_wim[(k * gsize + l) * vl + lane] = matrix[2 * (row * gsize + col) + 1];
-        }
-      }
+      lane_offsets_buf[lane] = ii_lane * 2 * sizeof(fp_type);
     }
+    svuint64_t v_lane_offsets = svld1_u64(pg64, lane_offsets_buf);
 
-    auto f = [](unsigned n, unsigned m_idx, uint64_t i, const fp_type* wre_ptr,
-                const fp_type* wim_ptr, const uint64_t* ms, const uint64_t* xss,
-                uint64_t qmaskl, const fp_type* rstate) -> std::complex<double> {
-      constexpr unsigned gsize = 1 << (H + L);
-      constexpr unsigned hsize = 1 << H;
-      constexpr unsigned lsize = 1 << L;
-
-      svbool_t pg = svptrue_b32();
+    auto f = [](unsigned n, unsigned m_idx, uint64_t i_block, const fp_type* v,
+                const uint64_t* ms, const uint64_t* xss,
+                svuint64_t v_lane_offsets,
+                const fp_type* rstate) -> std::complex<double> {
+      constexpr unsigned gsize = 1 << N;
+      uint64_t vl64 = svcntd();
+      svbool_t pg64 = svptrue_b64();
+      svbool_t pg32 = svptrue_b32();
       uint64_t vl = svcntw();
-      svuint32_t idx = svindex_u32(0, 1);
-      unsigned nlb = bits::Log2(vl);
 
-      i *= vl;
-      uint64_t ii = i & ms[0];
-      for (unsigned j = 1; j <= H; ++j) {
-        i *= 2; ii |= i & ms[j];
+      i_block *= vl64;
+      uint64_t ii_block = i_block & ms[0];
+      uint64_t shifted = i_block;
+      for (unsigned j = 1; j <= N; ++j) {
+        shifted *= 2;
+        ii_block |= shifted & ms[j];
       }
 
-      auto p0 = rstate + 2 * ii;
-      __builtin_prefetch(p0 + 64);
+      const fp_type* p0 = rstate + 2 * ii_block;
 
-      alignas(64) fp_type tmp_rs[4096];
-      alignas(64) fp_type tmp_is[4096];
-
-      uint32_t flips[64];
-      for (unsigned r = 0; r < lsize; ++r) {
-        flips[r] = bits::ExpandBits((uint64_t)r, nlb, qmaskl);
-      }
-
-      for (unsigned k = 0; k < hsize; ++k) {
-        unsigned k2 = lsize * k;
-        svfloat32_t r0 = svld1_f32(pg, p0 + xss[k]);
-        svfloat32_t i0 = svld1_f32(pg, p0 + xss[k] + vl);
-
-        for (unsigned r = 0; r < lsize; ++r) {
-          svuint32_t perm = sveor_u32_z(pg, idx, svdup_n_u32(flips[r]));
-          svst1_f32(pg, tmp_rs + (k2 + r) * vl, svtbl_f32(r0, perm));
-          svst1_f32(pg, tmp_is + (k2 + r) * vl, svtbl_f32(i0, perm));
+      alignas(64) fp_type tmp[4096];
+      if constexpr (N > 2) {
+        for (unsigned k = 0; k < gsize; ++k) {
+          svfloat64_t gathered = svld1_gather_u64offset_f64(
+              pg64, (const double*)(p0 + xss[k]), v_lane_offsets);
+          svst1_f32(pg32, tmp + k * vl, svreinterpret_f32_f64(gathered));
         }
       }
 
-      svfloat32_t acc_re = svdup_n_f32(0);
-      svfloat32_t acc_im = svdup_n_f32(0);
+      svfloat32_t acc_re = svdup_n_f32(0.0f);
+      svfloat32_t acc_im = svdup_n_f32(0.0f);
 
-      for (unsigned k = 0; k < hsize; ++k) {
-        svfloat32_t rn = svdup_n_f32(0);
-        svfloat32_t in = svdup_n_f32(0);
-
+      for (unsigned k = 0; k < gsize; ++k) {
+        svfloat32_t sum = svdup_n_f32(0.0f);
+        const double* p_v0 = (const double*)&v[2 * (k * gsize)];
+#pragma GCC unroll 64
         for (unsigned l = 0; l < gsize; ++l) {
-          svfloat32_t rl = svld1_f32(pg, tmp_rs + l * vl);
-          svfloat32_t il = svld1_f32(pg, tmp_is + l * vl);
+          svfloat32_t m_kl = svreinterpret_f32_f64(svdup_n_f64(*p_v0++));
 
-          svfloat32_t wre = svld1_f32(pg, wre_ptr + (k * gsize + l) * vl);
-          svfloat32_t wim = svld1_f32(pg, wim_ptr + (k * gsize + l) * vl);
-
-          rn = svmla_f32_x(pg, rn, rl, wre);
-          rn = svmls_f32_x(pg, rn, il, wim);
-          in = svmla_f32_x(pg, in, rl, wim);
-          in = svmla_f32_x(pg, in, il, wre);
+          svfloat32_t sv_l = svld1_f32(pg32, tmp + l * vl);
+          sum = svcmla_f32_x(pg32, sum, sv_l, m_kl, 0);
+          sum = svcmla_f32_x(pg32, sum, sv_l, m_kl, 90);
         }
 
-        svfloat32_t rk = svld1_f32(pg, tmp_rs + k * lsize * vl);
-        svfloat32_t ik = svld1_f32(pg, tmp_is + k * lsize * vl);
+        svfloat32_t rk;
+        if constexpr (N <= 2) {
+          rk = svreinterpret_f32_f64(svld1_gather_u64offset_f64(
+              pg64, (const double*)(p0 + xss[k]), v_lane_offsets));
+        } else {
+          rk = svld1_f32(pg32, tmp + k * vl);
+        }
 
-        acc_re = svmla_f32_x(pg, acc_re, rk, rn);
-        acc_re = svmla_f32_x(pg, acc_re, ik, in);
-        acc_im = svmla_f32_x(pg, acc_im, rk, in);
-        acc_im = svmls_f32_x(pg, acc_im, ik, rn);
+        svfloat32_t rk_re = svuzp1_f32(rk, rk);
+        svfloat32_t rk_im = svuzp2_f32(rk, rk);
+        svfloat32_t sum_re = svuzp1_f32(sum, sum);
+        svfloat32_t sum_im = svuzp2_f32(sum, sum);
+
+        acc_re = svmla_f32_x(pg32, acc_re, rk_re, sum_re);
+        acc_re = svmla_f32_x(pg32, acc_re, rk_im, sum_im);
+        acc_im = svmla_f32_x(pg32, acc_im, rk_re, sum_im);
+        acc_im = svmls_f32_x(pg32, acc_im, rk_im, sum_re);
       }
 
-      return std::complex<double>((double)svaddv_f32(pg, acc_re),
-                                  (double)svaddv_f32(pg, acc_im));
+      return std::complex<double>(
+          (double)svaddv_f32(pg32, acc_re) * 0.5,
+          (double)svaddv_f32(pg32, acc_im) * 0.5);
     };
 
-    uint64_t ms[H + 1];
-    uint64_t xss[1 << H];
-    FillIndices<H, L>(state.num_qubits(), qs, ms, xss);
-
-    const unsigned k_param = bits::Log2(vl) + H;
-    const unsigned n = state.num_qubits() > k_param ? state.num_qubits() - k_param : 0;
+    const unsigned k_param = bits::Log2(vl64) + N;
+    const unsigned n =
+        state.num_qubits() > k_param ? state.num_qubits() - k_param : 0;
     const uint64_t size = uint64_t{1} << n;
 
     using Op = std::plus<std::complex<double>>;
-    return for_.RunReduce(size, f, Op(), precomp_wre.data(), precomp_wim.data(), ms, xss, qmaskl, state.get());
+    return for_.RunReduce(
+        size, f, Op(), matrix, ms, xss, v_lane_offsets, state.get());
   }
 
   For for_;
