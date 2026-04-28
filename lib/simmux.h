@@ -15,7 +15,13 @@
 #ifndef SIMMUX_H_
 #define SIMMUX_H_
 
-#if defined(__ARM_NEON__) || defined(__ARM_NEON)
+#if defined(__ARM_FEATURE_SVE2)
+# include "simulator_sve2.h"
+  namespace qsim {
+    template <typename For>
+    using Simulator = SimulatorSVE2<For>;
+  }
+#elif defined(__ARM_NEON__) || defined(__ARM_NEON)
 # include "simulator_neon.h"
   namespace qsim {
     template <typename For>

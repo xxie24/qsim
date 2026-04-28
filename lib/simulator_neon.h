@@ -340,6 +340,7 @@ class SimulatorNEON final : public SimulatorBase {
       }
 
       auto p0 = rstate + 2 * ii;
+      __builtin_prefetch(p0 + 64);
 
       for (unsigned k = 0; k < hsize; ++k) {
         rs[k] = vld1q_f32(p0 + xss[k]);
@@ -409,6 +410,7 @@ class SimulatorNEON final : public SimulatorBase {
       }
 
       auto p0 = rstate + 2 * ii;
+      __builtin_prefetch(p0 + 64);
 
       for (unsigned k = 0; k < hsize; ++k) {
         unsigned k2 = lsize * k;
@@ -498,6 +500,7 @@ class SimulatorNEON final : public SimulatorBase {
       if ((ii & cmaskh) != cvalsh) return;
 
       auto p0 = rstate + 2 * ii;
+      __builtin_prefetch(p0 + 64);
 
       for (unsigned k = 0; k < hsize; ++k) {
         rs[k] = vld1q_f32(p0 + xss[k]);
@@ -568,6 +571,7 @@ class SimulatorNEON final : public SimulatorBase {
       if ((ii & cmaskh) != cvalsh) return;
 
       auto p0 = rstate + 2 * ii;
+      __builtin_prefetch(p0 + 64);
 
       for (unsigned k = 0; k < hsize; ++k) {
         rs[k] = vld1q_f32(p0 + xss[k]);
@@ -642,6 +646,7 @@ class SimulatorNEON final : public SimulatorBase {
       if ((ii & cmaskh) != cvalsh) return;
 
       auto p0 = rstate + 2 * ii;
+      __builtin_prefetch(p0 + 64);
 
       for (unsigned k = 0; k < hsize; ++k) {
         unsigned k2 = lsize * k;
@@ -736,6 +741,7 @@ class SimulatorNEON final : public SimulatorBase {
       }
 
       auto p0 = rstate + 2 * ii;
+      __builtin_prefetch(p0 + 64);
 
       for (unsigned k = 0; k < hsize; ++k) {
         rs[k] = vld1q_f32(p0 + xss[k]);
@@ -814,6 +820,7 @@ class SimulatorNEON final : public SimulatorBase {
       }
 
       auto p0 = rstate + 2 * ii;
+      __builtin_prefetch(p0 + 64);
 
       for (unsigned k = 0; k < hsize; ++k) {
         unsigned k2 = lsize * k;

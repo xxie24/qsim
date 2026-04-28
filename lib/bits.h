@@ -100,6 +100,13 @@ inline Integer PermuteBits(
   return pbits;
 }
 
+template <typename Integer>
+inline unsigned Log2(Integer n) {
+  unsigned k = 0;
+  while (n >>= 1) ++k;
+  return k;
+}
+
 }  // namespace bits
 }  // namespace qsim
 

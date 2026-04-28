@@ -169,6 +169,7 @@ class SimulatorSVE2 final : public SimulatorBase {
         i *= 2; ii |= i & ms[j];
       }
       auto p0 = rstate + 2 * ii;
+      __builtin_prefetch(p0 + 64);
 
       alignas(64) fp_type tmp_rs[4096];
       alignas(64) fp_type tmp_is[4096];
@@ -263,9 +264,15 @@ class SimulatorSVE2 final : public SimulatorBase {
       }
 
       auto p0 = rstate + 2 * ii;
+      __builtin_prefetch(p0 + 64);
 
       alignas(64) fp_type tmp_rs[4096];
       alignas(64) fp_type tmp_is[4096];
+
+      uint32_t flips[64];
+      for (unsigned r = 0; r < lsize; ++r) {
+        flips[r] = bits::ExpandBits((uint64_t)r, nlb, qmaskl);
+      }
 
       for (unsigned k = 0; k < hsize; ++k) {
         unsigned k2 = lsize * k;
@@ -273,8 +280,7 @@ class SimulatorSVE2 final : public SimulatorBase {
         svfloat32_t i0 = svld1_f32(pg, p0 + xss[k] + vl);
 
         for (unsigned r = 0; r < lsize; ++r) {
-          uint32_t flip = bits::ExpandBits((uint64_t)r, nlb, qmaskl);
-          svuint32_t perm = sveor_u32_z(pg, idx, svdup_n_u32(flip));
+          svuint32_t perm = sveor_u32_z(pg, idx, svdup_n_u32(flips[r]));
           svst1_f32(pg, tmp_rs + (k2 + r) * vl, svtbl_f32(r0, perm));
           svst1_f32(pg, tmp_is + (k2 + r) * vl, svtbl_f32(i0, perm));
         }
@@ -333,6 +339,7 @@ class SimulatorSVE2 final : public SimulatorBase {
       if ((ii & cmaskh) != cvalsh) return;
 
       auto p0 = rstate + 2 * ii;
+      __builtin_prefetch(p0 + 64);
 
       alignas(64) fp_type tmp_rs[4096];
       alignas(64) fp_type tmp_is[4096];
@@ -400,6 +407,7 @@ class SimulatorSVE2 final : public SimulatorBase {
       if ((ii & cmaskh) != cvalsh) return;
 
       auto p0 = rstate + 2 * ii;
+      __builtin_prefetch(p0 + 64);
 
       alignas(64) fp_type tmp_rs[4096];
       alignas(64) fp_type tmp_is[4096];
@@ -516,9 +524,15 @@ class SimulatorSVE2 final : public SimulatorBase {
       if ((ii & cmaskh) != cvalsh) return;
 
       auto p0 = rstate + 2 * ii;
+      __builtin_prefetch(p0 + 64);
 
       alignas(64) fp_type tmp_rs[4096];
       alignas(64) fp_type tmp_is[4096];
+
+      uint32_t flips[64];
+      for (unsigned r = 0; r < lsize; ++r) {
+        flips[r] = bits::ExpandBits((uint64_t)r, nlb, qmaskl);
+      }
 
       for (unsigned k = 0; k < hsize; ++k) {
         unsigned k2 = lsize * k;
@@ -526,8 +540,7 @@ class SimulatorSVE2 final : public SimulatorBase {
         svfloat32_t i0 = svld1_f32(pg, p0 + xss[k] + vl);
 
         for (unsigned r = 0; r < lsize; ++r) {
-          uint32_t flip = bits::ExpandBits((uint64_t)r, nlb, qmaskl);
-          svuint32_t perm = sveor_u32_z(pg, idx, svdup_n_u32(flip));
+          svuint32_t perm = sveor_u32_z(pg, idx, svdup_n_u32(flips[r]));
           svst1_f32(pg, tmp_rs + (k2 + r) * vl, svtbl_f32(r0, perm));
           svst1_f32(pg, tmp_is + (k2 + r) * vl, svtbl_f32(i0, perm));
         }
@@ -604,6 +617,7 @@ class SimulatorSVE2 final : public SimulatorBase {
       }
 
       auto p0 = rstate + 2 * ii;
+      __builtin_prefetch(p0 + 64);
 
       alignas(64) fp_type tmp_rs[4096];
       alignas(64) fp_type tmp_is[4096];
@@ -710,9 +724,15 @@ class SimulatorSVE2 final : public SimulatorBase {
       }
 
       auto p0 = rstate + 2 * ii;
+      __builtin_prefetch(p0 + 64);
 
       alignas(64) fp_type tmp_rs[4096];
       alignas(64) fp_type tmp_is[4096];
+
+      uint32_t flips[64];
+      for (unsigned r = 0; r < lsize; ++r) {
+        flips[r] = bits::ExpandBits((uint64_t)r, nlb, qmaskl);
+      }
 
       for (unsigned k = 0; k < hsize; ++k) {
         unsigned k2 = lsize * k;
@@ -720,8 +740,7 @@ class SimulatorSVE2 final : public SimulatorBase {
         svfloat32_t i0 = svld1_f32(pg, p0 + xss[k] + vl);
 
         for (unsigned r = 0; r < lsize; ++r) {
-          uint32_t flip = bits::ExpandBits((uint64_t)r, nlb, qmaskl);
-          svuint32_t perm = sveor_u32_z(pg, idx, svdup_n_u32(flip));
+          svuint32_t perm = sveor_u32_z(pg, idx, svdup_n_u32(flips[r]));
           svst1_f32(pg, tmp_rs + (k2 + r) * vl, svtbl_f32(r0, perm));
           svst1_f32(pg, tmp_is + (k2 + r) * vl, svtbl_f32(i0, perm));
         }
