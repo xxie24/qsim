@@ -320,10 +320,91 @@ class SimulatorNEON final : public SimulatorBase {
   static unsigned SIMDRegisterSize() { return 4; }
 
  private:
+  static void PackApplyGateH3Matrix(const fp_type* matrix, fp_type* vre,
+                                    fp_type* vim) {
+    for (unsigned i = 0, j = 0; i < 64; ++i, j += 2) {
+      vre[i] = matrix[j];
+      vim[i] = matrix[j + 1];
+    }
+  }
+
+  void ApplyGateH3(const std::vector<unsigned>& qs, const fp_type* matrix,
+                   State& state) const {
+    auto f = [](unsigned n, unsigned m, uint64_t i, const fp_type* vre,
+                const fp_type* vim, const uint64_t* ms, const uint64_t* xss,
+                fp_type* rstate) {
+      constexpr unsigned hsize = 8;
+
+      float32x4_t rs[hsize];
+      float32x4_t is[hsize];
+
+      i *= 4;
+
+      uint64_t ii = i & ms[0];
+      for (unsigned j = 1; j <= 3; ++j) {
+        i *= 2;
+        ii |= i & ms[j];
+      }
+
+      auto p0 = rstate + 2 * ii;
+
+      for (unsigned k = 0; k < hsize; ++k) {
+        rs[k] = vld1q_f32(p0 + xss[k]);
+        is[k] = vld1q_f32(p0 + xss[k] + 4);
+      }
+
+      uint64_t j = 0;
+
+      for (unsigned k = 0; k < hsize; ++k) {
+        float32x4_t ru = vdupq_n_f32(vre[j]);
+        float32x4_t iu = vdupq_n_f32(vim[j]);
+        float32x4_t rn = vmulq_f32(rs[0], ru);
+        float32x4_t in = vmulq_f32(rs[0], iu);
+        rn = vfmsq_f32(rn, is[0], iu);
+        in = vfmaq_f32(in, is[0], ru);
+
+        ++j;
+
+        for (unsigned l = 1; l < hsize; ++l) {
+          ru = vdupq_n_f32(vre[j]);
+          iu = vdupq_n_f32(vim[j]);
+          rn = vfmaq_f32(rn, rs[l], ru);
+          in = vfmaq_f32(in, rs[l], iu);
+          rn = vfmsq_f32(rn, is[l], iu);
+          in = vfmaq_f32(in, is[l], ru);
+
+          ++j;
+        }
+
+        vst1q_f32(p0 + xss[k], rn);
+        vst1q_f32(p0 + xss[k] + 4, in);
+      }
+    };
+
+    uint64_t ms[4];
+    uint64_t xss[8];
+    alignas(16) fp_type vre[64];
+    alignas(16) fp_type vim[64];
+
+    FillIndices<3>(state.num_qubits(), qs, ms, xss);
+    PackApplyGateH3Matrix(matrix, vre, vim);
+
+    const unsigned k = 5;
+    const unsigned n = state.num_qubits() > k ? state.num_qubits() - k : 0;
+    const uint64_t size = uint64_t{1} << n;
+
+    for_.Run(size, f, vre, vim, ms, xss, state.get());
+  }
+
   template <unsigned H>
   void ApplyGateH(
       const std::vector<unsigned>& qs, const fp_type* matrix,
       State& state) const {
+    if constexpr (H == 3) {
+      ApplyGateH3(qs, matrix, state);
+      return;
+    }
+
     auto f = [](unsigned n, unsigned m, uint64_t i, const fp_type* v,
                 const uint64_t* ms, const uint64_t* xss, fp_type* rstate) {
       constexpr unsigned hsize = 1 << H;
