@@ -353,28 +353,34 @@ class SimulatorNEON final : public SimulatorBase {
         is[k] = vld1q_f32(p0 + xss[k] + 4);
       }
 
-      uint64_t j = 0;
-
       for (unsigned k = 0; k < hsize; ++k) {
-        float32x4_t ru = vdupq_n_f32(vre[j]);
-        float32x4_t iu = vdupq_n_f32(vim[j]);
+        const uint64_t row = hsize * k;
+        float32x4_t ru = vdupq_n_f32(vre[row]);
+        float32x4_t iu = vdupq_n_f32(vim[row]);
         float32x4_t rn = vmulq_f32(rs[0], ru);
         float32x4_t in = vmulq_f32(rs[0], iu);
         rn = vfmsq_f32(rn, is[0], iu);
         in = vfmaq_f32(in, is[0], ru);
 
-        ++j;
+        ru = vdupq_n_f32(vre[row + 1]);
+        iu = vdupq_n_f32(vim[row + 1]);
 
-        for (unsigned l = 1; l < hsize; ++l) {
-          ru = vdupq_n_f32(vre[j]);
-          iu = vdupq_n_f32(vim[j]);
+        for (unsigned l = 1; l + 1 < hsize; ++l) {
+          float32x4_t ru_next = vdupq_n_f32(vre[row + l + 1]);
+          float32x4_t iu_next = vdupq_n_f32(vim[row + l + 1]);
           rn = vfmaq_f32(rn, rs[l], ru);
           in = vfmaq_f32(in, rs[l], iu);
           rn = vfmsq_f32(rn, is[l], iu);
           in = vfmaq_f32(in, is[l], ru);
 
-          ++j;
+          ru = ru_next;
+          iu = iu_next;
         }
+
+        rn = vfmaq_f32(rn, rs[hsize - 1], ru);
+        in = vfmaq_f32(in, rs[hsize - 1], iu);
+        rn = vfmsq_f32(rn, is[hsize - 1], iu);
+        in = vfmaq_f32(in, is[hsize - 1], ru);
 
         vst1q_f32(p0 + xss[k], rn);
         vst1q_f32(p0 + xss[k] + 4, in);
