@@ -353,27 +353,24 @@ class SimulatorNEON final : public SimulatorBase {
         is[k] = vld1q_f32(p0 + xss[k] + 4);
       }
 
-      uint64_t j = 0;
-
       for (unsigned k = 0; k < hsize; ++k) {
-        float32x4_t ru = vdupq_n_f32(vre[j]);
-        float32x4_t iu = vdupq_n_f32(vim[j]);
+        const fp_type* vre_row = vre + hsize * k;
+        const fp_type* vim_row = vim + hsize * k;
+
+        float32x4_t ru = vdupq_n_f32(vre_row[0]);
+        float32x4_t iu = vdupq_n_f32(vim_row[0]);
         float32x4_t rn = vmulq_f32(rs[0], ru);
         float32x4_t in = vmulq_f32(rs[0], iu);
         rn = vfmsq_f32(rn, is[0], iu);
         in = vfmaq_f32(in, is[0], ru);
 
-        ++j;
-
         for (unsigned l = 1; l < hsize; ++l) {
-          ru = vdupq_n_f32(vre[j]);
-          iu = vdupq_n_f32(vim[j]);
+          ru = vdupq_n_f32(vre_row[l]);
+          iu = vdupq_n_f32(vim_row[l]);
           rn = vfmaq_f32(rn, rs[l], ru);
           in = vfmaq_f32(in, rs[l], iu);
           rn = vfmsq_f32(rn, is[l], iu);
           in = vfmaq_f32(in, is[l], ru);
-
-          ++j;
         }
 
         vst1q_f32(p0 + xss[k], rn);
