@@ -317,7 +317,12 @@ class SimulatorNEON final : public SimulatorBase {
     return 0;
   }
 
-  static unsigned SIMDRegisterSize() { return 4; }
+  /**
+   * @return The size of SIMD register if applicable.
+   */
+  static unsigned SIMDRegisterSize() {
+    return 4;
+  }
 
  private:
   static void PackApplyGateH3Matrix(const fp_type* matrix, fp_type* vre,
@@ -966,6 +971,7 @@ class SimulatorNEON final : public SimulatorBase {
     using Op = std::plus<std::complex<double>>;
     return for_.RunReduce(size, f, Op(), w, ms, xss, qs[0], state.get());
   }
+
   For for_;
 };
 
