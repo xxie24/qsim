@@ -12,7 +12,9 @@ CUSTATEVEC_TARGETS := $(CUSTATEVEC_TARGETS:%custatevec.cu=%custatevec.x)
 CUSTATEVECEX_TARGETS = $(shell find . -maxdepth 1 -name "*custatevecex.cu")
 CUSTATEVECEX_TARGETS := $(CUSTATEVECEX_TARGETS:%custatevecex.cu=%custatevecex.x)
 
-HIP_TARGETS = $(shell find . -maxdepth 1 -name '*cuda.cu')
+# The gate-batch CUDA backend uses CUDA-only APIs, so it has no HIP build.
+HIP_TARGETS = $(shell find . -maxdepth 1 -name '*cuda.cu' \
+                ! -name 'qsim_gate_batch*')
 HIP_TARGETS := $(HIP_TARGETS:%cuda.cu=%hip.x)
 
 .PHONY: qsim

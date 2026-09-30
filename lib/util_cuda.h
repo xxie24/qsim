@@ -21,6 +21,7 @@
   #include <hip/hip_runtime.h>
 #endif
 
+#include <complex>
 #include <cstdlib>
 #include <type_traits>
 

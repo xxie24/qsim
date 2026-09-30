@@ -19,10 +19,11 @@
 // Data hierarchy:
 //   Circuit: the full program, as an ordered list of raw gates.
 //   Tile: a fast-memory-sized slice of 2^tile_qubits amplitudes (held in a
-//         CPU cache); one gate batch runs against every tile.
+//         CPU cache or GPU shared memory); one gate batch runs against every
+//         tile.
 //   Lane group: the vectorized unit of the state layout - 2^lane_qubits
-//               complex amplitudes, one per SIMD lane (NEON/SSE: 4, AVX2: 8,
-//               AVX512: 16).
+//               complex amplitudes, one per SIMD or warp lane (NEON/SSE: 4,
+//               AVX2: 8, AVX512: 16, CUDA warp: 32).
 //
 // Algorithm:
 //   Move the most-used logical qubits into the fixed low zone up front
@@ -50,8 +51,8 @@
 // peephole, or diagonal-gate phase kernel/bundle. All fusion happens
 // inside the per-batch fuser above.
 //
-// Backends (run_qsim_gate_batch.h for CPUs) own the state memory and
-// provide:
+// Backends (run_qsim_gate_batch.h for CPUs, run_qsim_gate_batch_cuda.h for
+// CUDA) own the state memory and provide:
 //   using State, StateSpace, fp_type;
 //   struct Parameter;  // backend-specific options, part of the runner's
 //   static constexpr unsigned kDefaultTileQubits, kDefaultEvictionFloor;
@@ -864,7 +865,7 @@ class GateBatchRunner {
 
   // ======== Timing ========
 
-  // Backends may queue work asynchronously, so per-step timings,
+  // Backends may queue work asynchronously (CUDA), so per-step timings,
   // which are reported only at verbosity > 1, wait for it to finish.
   double StartTimer() {
     if (param_.verbosity > 1) backend_.Synchronize();
