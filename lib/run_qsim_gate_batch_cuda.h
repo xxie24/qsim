@@ -65,7 +65,7 @@ class CudaGateBatchBackend {
   // amplitude): 13 uses 64 KiB, plus 8 KiB for the gate matrix, and was the
   // fastest on every tested circuit (RTX 4070).
   static constexpr unsigned kDefaultTileQubits = 13;
-  static constexpr unsigned kDefaultEvictionFloor = 0;
+  static constexpr unsigned kDefaultEvictionFloor = 5;
 
   // The widest gate ApplyBatchToTilesKernel applies.
   static constexpr unsigned kMaxGateQubits = gate_batch_cuda::kMaxGateQubits;
@@ -118,28 +118,46 @@ class CudaGateBatchBackend {
   void ExecuteBatch(const std::vector<ExecutableGate>& gates) {
     host_gates_.clear();
     host_matrices_.clear();
+    unsigned max_gate_qubits = 0;
     for (const auto& gate : gates) {
-      gate_batch_cuda::DeviceGate device_gate{};
-      device_gate.num_qubits = gate.physical_qubits.size();
-      std::copy(gate.physical_qubits.begin(), gate.physical_qubits.end(),
-                device_gate.qubits);
-      device_gate.matrix_offset = host_matrices_.size();
+      const unsigned k = gate.physical_qubits.size();
+      max_gate_qubits = std::max(max_gate_qubits, k);
+      const unsigned offset = host_matrices_.size();
       host_matrices_.insert(host_matrices_.end(), gate.matrix.begin(),
                             gate.matrix.end());
-      host_gates_.push_back(device_gate);
+      host_gates_.push_back(BuildDeviceGate(tile_qubits_, gate, offset));
     }
     Upload(host_gates_, d_gates_, gates_capacity_);
     Upload(host_matrices_, d_matrices_, matrices_capacity_);
 
+    const unsigned h_max = 1u << max_gate_qubits;
+    const unsigned matrix_stride = 2u * h_max * h_max;
+    const std::size_t shared_bytes =
+        TileSharedBytes(tile_qubits_, max_gate_qubits);
     const unsigned num_tiles = 1u << (num_qubits_ - tile_qubits_);
-    auto kernel = gate_batch_cuda::ApplyBatchToTilesKernel<FP>;
-    ErrorCheck(cudaFuncSetAttribute(
-        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-        TileSharedBytes(tile_qubits_)));
-    kernel<<<num_tiles, param_.threads_per_block,
-             TileSharedBytes(tile_qubits_)>>>(
-        state_, tile_qubits_, d_gates_, unsigned(host_gates_.size()),
-        d_matrices_);
+    const unsigned k_dispatch = std::max(1u, max_gate_qubits);
+    if (k_dispatch <= 3) {
+      auto kernel = gate_batch_cuda::ApplyBatchToTilesKernel<FP, 3>;
+      ErrorCheck(cudaFuncSetAttribute(
+          kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_bytes));
+      kernel<<<num_tiles, param_.threads_per_block, shared_bytes>>>(
+          state_, tile_qubits_, d_gates_, unsigned(host_gates_.size()),
+          d_matrices_, matrix_stride);
+    } else if (k_dispatch == 4) {
+      auto kernel = gate_batch_cuda::ApplyBatchToTilesKernel<FP, 4>;
+      ErrorCheck(cudaFuncSetAttribute(
+          kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_bytes));
+      kernel<<<num_tiles, param_.threads_per_block, shared_bytes>>>(
+          state_, tile_qubits_, d_gates_, unsigned(host_gates_.size()),
+          d_matrices_, matrix_stride);
+    } else {
+      auto kernel = gate_batch_cuda::ApplyBatchToTilesKernel<FP, 5>;
+      ErrorCheck(cudaFuncSetAttribute(
+          kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_bytes));
+      kernel<<<num_tiles, param_.threads_per_block, shared_bytes>>>(
+          state_, tile_qubits_, d_gates_, unsigned(host_gates_.size()),
+          d_matrices_, matrix_stride);
+    }
     ErrorCheck(cudaGetLastError());
   }
 
@@ -149,10 +167,106 @@ class CudaGateBatchBackend {
   // Tiles need at least one lane group of StateSpaceCUDA (one warp).
   static constexpr unsigned kLayoutLaneQubits = remap_cuda::kLaneQubits;
 
-  // Tile (real and imaginary arrays) plus the largest gate matrix.
-  static std::size_t TileSharedBytes(unsigned tile_qubits) {
-    const std::size_t h = std::size_t{1} << gate_batch_cuda::kMaxGateQubits;
-    return sizeof(FP) * (2 * (std::size_t{1} << tile_qubits) + 2 * h * h);
+  static gate_batch_cuda::DeviceGate BuildDeviceGate(
+      unsigned tile_qubits, const ExecutableGate& gate,
+      unsigned matrix_offset) {
+    using gate_batch_cuda::Swizzle;
+    gate_batch_cuda::DeviceGate dg{};
+    const unsigned k = gate.physical_qubits.size();
+    dg.num_qubits = k;
+    dg.matrix_offset = matrix_offset;
+    dg.w_clear_mask = ~31u;
+    if (k == 0) return dg;
+
+    unsigned ng[64];
+    unsigned num_g_bits = 0;
+    for (unsigned p = 0, qi = 0; p < tile_qubits; ++p) {
+      if (qi < k && gate.physical_qubits[qi] == p) {
+        ++qi;
+      } else {
+        ng[num_g_bits++] = p;
+      }
+    }
+
+    const unsigned low_bits = std::min(kLayoutLaneQubits, num_g_bits);
+    unsigned basis[kLayoutLaneQubits] = {};
+    unsigned basis_size = 0;
+    unsigned dep_low[kLayoutLaneQubits] = {};
+    unsigned num_dep = 0;
+    for (unsigned b = 0; b < low_bits; ++b) {
+      unsigned v = Swizzle(1u << ng[b]) & 31u;
+      for (unsigned i = 0; i < basis_size; ++i) {
+        v = std::min(v, v ^ basis[i]);
+      }
+      if (v != 0) {
+        basis[basis_size++] = v;
+        std::sort(basis, basis + basis_size, std::greater<unsigned>());
+      } else {
+        dep_low[num_dep++] = b;
+      }
+    }
+
+    unsigned target[64];
+    for (unsigned i = 0; i < num_g_bits; ++i) target[i] = i;
+    unsigned num_swaps = 0;
+    for (unsigned d = 0; d < num_dep && num_swaps < 2; ++d) {
+      const unsigned b = dep_low[d];
+      for (unsigned hi = kLayoutLaneQubits; hi < num_g_bits; ++hi) {
+        if (target[hi] != hi) continue;
+        unsigned v = Swizzle(1u << ng[hi]) & 31u;
+        for (unsigned i = 0; i < basis_size; ++i) {
+          v = std::min(v, v ^ basis[i]);
+        }
+        if (v != 0) {
+          basis[basis_size++] = v;
+          std::sort(basis, basis + basis_size, std::greater<unsigned>());
+          target[b] = hi;
+          target[hi] = b;
+          dg.w_clear_mask &= ~(1u << hi);
+          if (num_swaps == 0) {
+            dg.w_shift0 = hi - b;
+            dg.w_bit0 = 1u << b;
+          } else {
+            dg.w_shift1 = hi - b;
+            dg.w_bit1 = 1u << b;
+          }
+          ++num_swaps;
+          break;
+        }
+      }
+    }
+
+    for (unsigned b = 0; b < kLayoutLaneQubits; ++b) {
+      dg.lane_swizzled[b] =
+          (b < low_bits) ? Swizzle(1u << ng[target[b]]) : 0u;
+    }
+
+    const auto& qubits = gate.physical_qubits;
+    dg.mss[0] = (1u << qubits[0]) - 1u;
+    for (unsigned q = 1; q < k; ++q) {
+      dg.mss[q] =
+          ((1u << qubits[q]) - 1u) ^ ((1u << (qubits[q - 1] + 1)) - 1u);
+    }
+    dg.mss[k] = ~((1u << (qubits[k - 1] + 1)) - 1u);
+
+    for (unsigned j = 0; j < (1u << k); ++j) {
+      unsigned x = 0;
+      for (unsigned q = 0; q < k; ++q) {
+        if ((j >> q) & 1) x |= 1u << qubits[q];
+      }
+      dg.swizzled_xss[j] = Swizzle(x);
+    }
+    return dg;
+  }
+
+  // Tile (real and imaginary arrays) plus double-buffered gate matrices and
+  // DeviceGate descriptors.
+  static std::size_t TileSharedBytes(
+      unsigned tile_qubits,
+      unsigned max_gate_qubits = gate_batch_cuda::kMaxGateQubits) {
+    const std::size_t h = std::size_t{1} << max_gate_qubits;
+    return sizeof(FP) * (2 * (std::size_t{1} << tile_qubits) + 4 * h * h) +
+           2 * sizeof(gate_batch_cuda::DeviceGate);
   }
 
   static std::size_t MaxSharedBytesPerBlock() {

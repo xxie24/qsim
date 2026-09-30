@@ -33,10 +33,11 @@ struct Options {
   unsigned maxtime = std::numeric_limits<unsigned>::max();
   unsigned max_fused_size = 3;
   unsigned tile_qubits = 13;
-  unsigned min_eviction_floor = 0;
+  unsigned min_eviction_floor = 5;
   unsigned max_gate_seeds = 64;
   bool commute_diagonal_gates = false;
   unsigned lane_qubits = 0;
+  unsigned threads_per_block = 256;
   unsigned verbosity = 0;
 };
 
@@ -45,10 +46,10 @@ Options GetOptions(int argc, char* argv[]) {
                            "-d maxtime -f max_fused_size -l tile_qubits "
                            "-e min_eviction_floor -g max_gate_seeds "
                            "-x commute_diagonal_gates -n lane_qubits "
-                           "-v verbosity\n";
+                           "-t threads_per_block -v verbosity\n";
   Options opt;
   int k;
-  while ((k = getopt(argc, argv, "c:d:f:l:e:g:x:n:v:")) != -1) {
+  while ((k = getopt(argc, argv, "c:d:f:l:e:g:x:n:t:v:")) != -1) {
     switch (k) {
       case 'c': opt.circuit_file = optarg; break;
       case 'd': opt.maxtime = std::atoi(optarg); break;
@@ -58,6 +59,7 @@ Options GetOptions(int argc, char* argv[]) {
       case 'g': opt.max_gate_seeds = std::atoi(optarg); break;
       case 'x': opt.commute_diagonal_gates = std::atoi(optarg) != 0; break;
       case 'n': opt.lane_qubits = std::atoi(optarg); break;
+      case 't': opt.threads_per_block = std::atoi(optarg); break;
       case 'v': opt.verbosity = std::atoi(optarg); break;
       default: qsim::IO::errorf(usage); exit(1);
     }
@@ -98,6 +100,7 @@ int main(int argc, char* argv[]) {
   param.max_gate_seeds = opt.max_gate_seeds;
   param.commute_diagonal_gates = opt.commute_diagonal_gates;
   param.lane_qubits = opt.lane_qubits;
+  param.threads_per_block = opt.threads_per_block;
   param.verbosity = opt.verbosity;
 
   if (!Runner::Run(param, circuit, state)) return 1;

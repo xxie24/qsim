@@ -84,12 +84,14 @@ __global__ void SwapBitPairsKernel(FP* state, uint64_t num_amplitudes,
     if (b > a) {
       const auto fa = RealFloatIndex(a);
       const auto fb = RealFloatIndex(b);
-      const FP re = state[fa];
-      const FP im = state[fa + kLanes];
-      state[fa] = state[fb];
-      state[fa + kLanes] = state[fb + kLanes];
-      state[fb] = re;
-      state[fb + kLanes] = im;
+      const FP re_a = state[fa];
+      const FP im_a = state[fa + kLanes];
+      const FP re_b = state[fb];
+      const FP im_b = state[fb + kLanes];
+      state[fa] = re_b;
+      state[fa + kLanes] = im_b;
+      state[fb] = re_a;
+      state[fb + kLanes] = im_a;
     }
   }
 }
@@ -130,7 +132,6 @@ __global__ void PermuteLaneGroupsKernel(FP* state, uint64_t num_units,
   const unsigned k = perm.num_cross;
   const unsigned half = 1u << k;  // Groups per bundle.
   FP* in = reinterpret_cast<FP*>(shared_bytes);
-  FP* out = in + 2 * half * kGroupFloats;
 
   uint64_t cross_mask = 0;
   for (unsigned i = 0; i < k; ++i) {
@@ -178,21 +179,15 @@ __global__ void PermuteLaneGroupsKernel(FP* state, uint64_t num_units,
     for (unsigned t = threadIdx.x; t < num_groups * kLanes; t += blockDim.x) {
       const unsigned slot = t / kLanes;
       const unsigned lane = t % kLanes;
-      const uint64_t dest = (group_of(slot) << kLaneQubits) | lane;
+      const uint64_t g_dest = group_of(slot);
+      const uint64_t dest = (g_dest << kLaneQubits) | lane;
       const uint64_t src = SwapAmplitudeBits(dest, perm.pairs);
       const unsigned from = slot_of(src >> kLaneQubits) * kGroupFloats +
                             unsigned(src & (kLanes - 1));
-      out[slot * kGroupFloats + lane] = in[from];
-      out[slot * kGroupFloats + lane + kLanes] = in[from + kLanes];
+      state[g_dest * kGroupFloats + lane] = in[from];
+      state[g_dest * kGroupFloats + lane + kLanes] = in[from + kLanes];
     }
-    __syncthreads();
-
-    for (unsigned f = threadIdx.x; f < num_groups * kGroupFloats;
-         f += blockDim.x) {
-      state[group_of(f / kGroupFloats) * kGroupFloats + f % kGroupFloats] =
-          out[f];
-    }
-    __syncthreads();  // Shared buffers are reused by the next unit.
+    __syncthreads();  // Shared buffer is reused by the next unit.
   }
 }
 
@@ -241,7 +236,7 @@ inline void ApplyBitPairSwapsCUDA(FP* state, unsigned num_qubits,
     const auto blocks =
         unsigned(std::min<uint64_t>(num_units, rc::kMaxPermuteBlocks));
     const std::size_t shared =
-        2 * max_groups * rc::kGroupFloats * sizeof(FP);
+        max_groups * rc::kGroupFloats * sizeof(FP);
     rc::PermuteLaneGroupsKernel<FP><<<blocks, threads, shared>>>(
         state, num_units, group_bits, perm);
   }
