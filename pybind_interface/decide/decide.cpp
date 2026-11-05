@@ -30,7 +30,7 @@ void cpuid(int info[4], int infoType){
 
 #endif
 
-enum Instructions { AVX512F = 0, AVX2 = 1, SSE4_1 = 2, BASIC = 3};
+enum Instructions { AVX512F = 0, AVX2 = 1, SSE4_1 = 2, BASIC = 3, NEON = 4};
 
 int detect_instructions() {
   Instructions instr = BASIC;
@@ -55,6 +55,8 @@ int detect_instructions() {
       instr = AVX512F;
     }
   }
+  #elif defined(__aarch64__) || defined(_M_ARM64)
+  instr = NEON;
   #endif
 
   return static_cast<int>(instr);

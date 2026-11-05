@@ -2354,3 +2354,15 @@ def test_qsim_simulator_reserved_keys():
             "used in QSimCircuit instantiation.",
         ):
             _ = qsimcirq.QSimSimulator(qsim_options={key: 1})
+
+
+@pytest.mark.parametrize(
+    "instructions, module_name",
+    [(0, "avx512"), (1, "avx2"), (2, "sse"), (3, "basic"), (4, "neon")],
+)
+def test_cpu_module_selection(monkeypatch, instructions, module_name):
+    monkeypatch.setattr(
+        qsimcirq.qsim_decide, "detect_instructions", lambda: instructions
+    )
+    monkeypatch.setattr(qsimcirq.importlib, "import_module", lambda name: name)
+    assert qsimcirq._load_simd_qsim() == f"qsimcirq.qsim_{module_name}"

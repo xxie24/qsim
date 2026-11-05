@@ -26,6 +26,8 @@ def _load_simd_qsim():
         qsim = importlib.import_module("qsimcirq.qsim_avx2")
     elif instr == 2:
         qsim = importlib.import_module("qsimcirq.qsim_sse")
+    elif instr == 4:
+        qsim = importlib.import_module("qsimcirq.qsim_neon")
     else:
         qsim = importlib.import_module("qsimcirq.qsim_basic")
     return qsim

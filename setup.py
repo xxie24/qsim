@@ -142,6 +142,7 @@ setup(
         CMakeExtension("qsimcirq/qsim_avx512"),
         CMakeExtension("qsimcirq/qsim_avx2"),
         CMakeExtension("qsimcirq/qsim_sse"),
+        CMakeExtension("qsimcirq/qsim_neon"),
         CMakeExtension("qsimcirq/qsim_basic"),
         CMakeExtension("qsimcirq/qsim_cuda"),
         CMakeExtension("qsimcirq/qsim_custatevec"),

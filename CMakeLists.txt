@@ -109,6 +109,11 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i386|i486|i586|i686)$")
     add_subdirectory(pybind_interface/avx2)
 endif()
 
+# NEON is available on all ARM64 CPUs.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+    add_subdirectory(pybind_interface/neon)
+endif()
+
 # Additional miscellaneous settings.
 # The following settings mirror what is in our hand-written Makefiles.
 set(CMAKE_CXX_STANDARD 17)
